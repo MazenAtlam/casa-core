@@ -1,0 +1,8 @@
+# Ignore ROS 2 compilation binaries
+build/
+install/
+log/
+
+# Ignore the heavy sub-repositories
+src/ambf/
+src/surgical_robotics_challenge/
