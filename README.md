@@ -27,3 +27,9 @@ git clone [https://github.com/collaborative-robotics/surgical_robotics_challenge
 cd ambf && git submodule update --init --recursive && cd ../..
 source /opt/ros/humble/setup.bash
 colcon build --symlink-install
+```
+
+## 🧩 System Patches
+The `src/casa_autonomy_stack/system_patches/` folder contains necessary modifications to third-party submodules that must be applied to the environment for this stack to work properly:
+- `psm_arm.py`: ROS 2 API fixes for the PSM arm.
+- `world_stereo_test.yaml`: Configuration to enable cameraL.

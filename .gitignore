@@ -6,3 +6,5 @@ log/
 # Ignore the heavy sub-repositories
 src/ambf/
 src/surgical_robotics_challenge/
+
+.vscode/
