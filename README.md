@@ -33,3 +33,8 @@ colcon build --symlink-install
 The `src/casa_autonomy_stack/system_patches/` folder contains necessary modifications to third-party submodules that must be applied to the environment for this stack to work properly:
 - `psm_arm.py`: ROS 2 API fixes for the PSM arm.
 - `world_stereo_test.yaml`: Configuration to enable cameraL.
+
+**For Team Members:** After cloning this repository and its sub-repositories, simply run the included script to automatically apply these patches:
+```bash
+./apply_patches.sh
+```
