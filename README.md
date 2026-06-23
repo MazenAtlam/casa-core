@@ -15,13 +15,13 @@ sudo apt update && sudo apt install git-lfs python3-vcstool -y
 git lfs install
 
 # 2. Clone this repository
-git clone [https://github.com/MazenAtlam/casa-core.git](https://github.com/MazenAtlam/casa-core.git)
+git clone https://github.com/MazenAtlam/casa-core.git
 cd casa-core
 
 # 3. Clone the required sub-repositories into src/
 cd src
-git clone [https://github.com/WPI-AIM/ambf.git](https://github.com/WPI-AIM/ambf.git)
-git clone [https://github.com/collaborative-robotics/surgical_robotics_challenge.git](https://github.com/collaborative-robotics/surgical_robotics_challenge.git)
+git clone https://github.com/WPI-AIM/ambf.git
+git clone https://github.com/collaborative-robotics/surgical_robotics_challenge.git
 
 # 4. Build the workspace
 cd ambf && git submodule update --init --recursive && cd ../..
