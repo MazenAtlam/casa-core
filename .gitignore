@@ -1,10 +1,32 @@
-# Ignore ROS 2 compilation binaries
+# --- Build & Logs (Crucial for Colcon) ---
 build/
 install/
 log/
+.catkin_tools/
+.colcon/
+*.pyc
 
-# Ignore the heavy sub-repositories
+# --- ROS 2 / IDE Specifics ---
+.vscode/
+.idea/
+.DS_Store
+*.swp
+*~
+
+# --- AMBF and Challenge Repositories ---
+# Since you are cloning these into src/, we ignore them to prevent 
+# Git from trying to track nested repositories.
 src/ambf/
 src/surgical_robotics_challenge/
 
-.vscode/
+# --- Large Files Managed by LFS ---
+# Ensure these aren't accidentally committed as raw binaries
+*.OBJ
+*.STL
+*.png
+*.jpg
+*.dae
+
+# --- OS Specific ---
+Thumbs.db
+Desktop.ini
