@@ -1,9 +1,3 @@
-That is a fantastic observation and a much cleaner solution! Switching to the `basic` shader path is superior because it avoids modifying the source code directly, which keeps your repository cleaner and prevents issues when you perform `git pull` updates in the future.
-
-I have updated the **Running the Simulation** and **Troubleshooting** sections below to reflect this as the recommended approach.
-
----
-
 # C.A.S.A. Core Digital Twin (ROS 2 Humble)
 
 This repository contains the foundational simulation infrastructure for the Compact Autonomous Surgical Arms (C.A.S.A.) project.
