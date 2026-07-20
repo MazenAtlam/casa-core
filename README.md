@@ -100,7 +100,7 @@ Execute this command to launch the C.A.S.A. digital twin.
 
 ```bash
 # Launch simulation
-ambf_simulator --launch_file casa_app/surgical_robotics_challenge/launch.yaml -l 0,1,2,3,4,5,14,15
+ambf_simulator --launch_file casa_app/surgical_robotics_challenge/launch.yaml -l 0,1,2,3,4
 
 ```
 
@@ -110,4 +110,4 @@ ambf_simulator --launch_file casa_app/surgical_robotics_challenge/launch.yaml -l
 
 * **Everything is white/Missing textures:** If the 3D objects still appear untextured (white), change the shader path in your launch configuration. Open `casa_app/surgical_robotics_challenge/ADF/world/world_stereo.yaml` and update the `shader_path` by replacing `rim_lighting` with `basic`.
 * **Shader Compilation Errors:** If the terminal reports `invalid enumerant` or `Shader compilation failed`, ensure your OpenGL overrides are set exactly as shown in the "Running the Simulation" section.
-* **Missing Arms/Actuator Errors:** Ensure you are loading indices `0,1,2,3,4,5,14,15` in the launch command to include both PSM1 and PSM2 arms.
+* **Missing Arms/Actuator Errors:** Ensure you are loading indices `0,1,2,3,4` in the launch command to include both PSM1 and PSM2 arms.
