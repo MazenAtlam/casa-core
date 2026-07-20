@@ -55,13 +55,11 @@ cd casa-core
 
 # Clone sub-repositories
 cd casa_app
+git clone https://github.com/WPI-AIM/ambf.git
 git clone https://github.com/collaborative-robotics/surgical_robotics_challenge.git
 
-cd casa_simulation
-git clone https://github.com/WPI-AIM/ambf.git
-
 # Initialize submodules and apply system patches
-cd ambf && git submodule update --init --recursive && cd ../../..
+cd ambf && git submodule update --init --recursive && cd ../..
 ./apply_patches.sh
 
 # Build the workspace

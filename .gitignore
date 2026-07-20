@@ -14,10 +14,12 @@ log/
 *~
 
 # --- AMBF and Challenge Repositories ---
-# Since you are cloning these into src/, we ignore them to prevent 
+# Since you are cloning these repositories, we ignore them to prevent 
 # Git from trying to track nested repositories.
 src/ambf/
 src/surgical_robotics_challenge/
+casa_app/ambf/
+casa_app/surgical_robotics_challenge/
 
 # --- Large Files Managed by LFS ---
 # Ensure these aren't accidentally committed as raw binaries
