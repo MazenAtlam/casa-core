@@ -61,7 +61,7 @@ cd casa_simulation
 git clone https://github.com/WPI-AIM/ambf.git
 
 # Initialize submodules and apply system patches
-cd ambf && git submodule update --init --recursive && cd ../..
+cd ambf && git submodule update --init --recursive && cd ../../..
 ./apply_patches.sh
 
 # Build the workspace
