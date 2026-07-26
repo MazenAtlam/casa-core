@@ -26,6 +26,8 @@ casa_app/surgical_robotics_challenge/
 *.OBJ
 *.STL
 *.png
+!casa_autonomy_stack/cv_pipeline/output/needle_path_20260727_002959.png
+!casa_autonomy_stack/cv_pipeline/output/raw_frame_20260727_002959.png
 *.jpg
 *.dae
 
