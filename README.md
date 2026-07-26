@@ -164,3 +164,31 @@ shaders:
 - **Everything is white/Missing textures:** If the 3D objects still appear untextured (white), change the shader path in your launch configuration. Open `casa_app/surgical_robotics_challenge/ADF/world/world_stereo.yaml` and update the `shader_path` by replacing `rim_lighting` with `basic`. *(Alternatively, completely comment out the shaders as shown in the Performance Optimization section).*
 - **Shader Compilation Errors:** If the terminal reports `invalid enumerant` or `Shader compilation failed`, ensure your OpenGL overrides are set exactly as shown in the "Running the Simulation" section.
 - **Missing Arms/Actuator Errors:** Ensure you are loading indices `0,1,2,3,4` in the launch command to include both `PSM1` and `PSM2` arms.
+
+## 👁️ Computer Vision & Needle Path Annotation
+
+The repository includes an automated Computer Vision pipeline (`needle_path_annotator.py`) designed to segment surgical phantoms and generate randomized suture waypoints for downstream imitation learning models.
+
+### How It Works
+
+1. **Camera Subscription**: Connects to the AMBF left camera ROS 2 topic (`/ambf/env/stereo/left/ImageData`).
+2. **Tissue Segmentation**: Uses combined HSV and intensity thresholding to isolate the surgical phantom pad from the background.
+3. **Zigzag Suture Prediction**: Applies Principal Component Analysis (PCA) to determine the wound axis and generates 8 alternating waypoints (4 stitch pairs) across both sides of the wound in a Z-pattern.
+4. **Randomized Variation**: Introduces controlled spatial jitter to spacing and lateral offsets on every run to prevent imitation learning overfitting.
+5. **Image Annotation**: Saves the raw camera frame, binary mask, and annotated trajectory overlay directly to disk.
+
+### Running the CV Pipeline
+
+Ensure the AMBF simulator is already running in a separate terminal, then execute from the root of your repository:
+
+```bash
+# Source environment and run the pipeline
+source /opt/ros/humble/setup.bash
+python3 casa_autonomy_stack/cv_pipeline/needle_path_annotator.py
+```
+
+### Example Output 
+
+Generated images are automatically saved to `casa_autonomy_stack/cv_pipeline/output/`.
+
+![Annotated Needle Path Trajectory](casa_autonomy_stack/cv_pipeline/output/needle_path_20260727_002959.png)
