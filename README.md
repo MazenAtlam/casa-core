@@ -187,8 +187,10 @@ source /opt/ros/humble/setup.bash
 python3 casa_autonomy_stack/cv_pipeline/needle_path_annotator.py
 ```
 
-### Example Output 
+### Example Output  
 
 Generated images are automatically saved to `casa_autonomy_stack/cv_pipeline/output/`.
 
-![Annotated Needle Path Trajectory](casa_autonomy_stack/cv_pipeline/output/your_image_name.png)
+| Raw Input Frame | Annotated Trajectory Output |
+| :---: | :---: |
+| ![Raw Frame](casa_autonomy_stack/cv_pipeline/output/raw_frame_20260727_002959.png) | ![Annotated Output](casa_autonomy_stack/cv_pipeline/output/needle_path_20260727_002959.png) |
