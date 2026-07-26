@@ -191,4 +191,4 @@ python3 casa_autonomy_stack/cv_pipeline/needle_path_annotator.py
 
 Generated images are automatically saved to `casa_autonomy_stack/cv_pipeline/output/`.
 
-![Annotated Needle Path Trajectory](casa_autonomy_stack/cv_pipeline/output/needle_path_20260727_002959.png)
+![Annotated Needle Path Trajectory](casa_autonomy_stack/cv_pipeline/output/your_image_name.png)
