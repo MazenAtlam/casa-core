@@ -165,32 +165,59 @@ shaders:
 - **Shader Compilation Errors:** If the terminal reports `invalid enumerant` or `Shader compilation failed`, ensure your OpenGL overrides are set exactly as shown in the "Running the Simulation" section.
 - **Missing Arms/Actuator Errors:** Ensure you are loading indices `0,1,2,3,4` in the launch command to include both `PSM1` and `PSM2` arms.
 
-## 👁️ Computer Vision & Needle Path Annotation
 
-The repository includes an automated Computer Vision pipeline (`needle_path_annotator.py`) designed to segment surgical phantoms and generate randomized suture waypoints for downstream imitation learning models.
+## Landmark Jitter Dataset Generator
 
-### How It Works
+`landmark_jitter_augmentor.py` turns the live AMBF camera feed into a
+training dataset for the imitation learning model, by taking each raw
+frame and creating a realistic, randomized variation of it.
 
-1. **Camera Subscription**: Connects to the AMBF left camera ROS 2 topic (`/ambf/env/stereo/left/ImageData`).
-2. **Tissue Segmentation**: Uses combined HSV and intensity thresholding to isolate the surgical phantom pad from the background.
-3. **Zigzag Suture Prediction**: Applies Principal Component Analysis (PCA) to determine the wound axis and generates 8 alternating waypoints (4 stitch pairs) across both sides of the wound in a Z-pattern.
-4. **Randomized Variation**: Introduces controlled spatial jitter to spacing and lateral offsets on every run to prevent imitation learning overfitting.
-5. **Image Annotation**: Saves the raw camera frame, binary mask, and annotated trajectory overlay directly to disk.
+### What it does
 
-### Running the CV Pipeline
+For every frame coming in from `/ambf/env/stereo/left/ImageData`:
 
-Ensure the AMBF simulator is already running in a separate terminal, then execute from the root of your repository:
+1. **Detect** — finds the 8 existing reddish landmark markers on the tissue.
+2. **Remove** — erases them with `cv2.inpaint()` so the tissue underneath looks perfectly clean.
+3. **Jitter** — picks new positions for all 8 markers with a small random shift (~8%), keeping the 4-left / 4-right formation intact.
+4. **Re-draw** — pastes each marker's *real* pixels back at its new position, so it still looks like an authentic marker instead of a fake shape.
+5. **Loop** — ROS2 is started once, then the script keeps grabbing frames, augmenting them, and saving them to `output/` until it has enough images.
 
-```bash
-# Source environment and run the pipeline
-source /opt/ros/humble/setup.bash
-python3 casa_autonomy_stack/cv_pipeline/needle_path_annotator.py
+### Output
+
+Each generated frame produces **two files**:
+
+```
+output/frame_00000.png   ← the augmented image
+output/frame_00000.json  ← the new (x, y) position of each of the 8 landmarks
 ```
 
-### Example Output  
+### Why the JSON files matter
 
-Generated images are automatically saved to `casa_autonomy_stack/cv_pipeline/output/`.
+An imitation learning model doesn't just need pictures — it needs to know
+*where the landmarks actually are* in each picture so it can learn to
+predict that. The JSON is the ground-truth label for its matching image.
+Without it, you'd have to re-detect the landmarks from the augmented
+image later just to get back the coordinates the script already knew —
+so they're saved right away instead.
 
-| Raw Input Frame | Annotated Trajectory Output |
-| :---: | :---: |
-| ![Raw Frame](casa_autonomy_stack/cv_pipeline/output/raw_frame_20260727_002959.png) | ![Annotated Output](casa_autonomy_stack/cv_pipeline/output/needle_path_20260727_002959.png) |
+Example:
+```json
+{
+  "landmarks": [
+    {"x": 748.9, "y": 480.6, "side": "left"},
+    {"x": 824.3, "y": 484.7, "side": "right"}
+  ]
+}
+```
+
+### Controlling how many images are generated
+
+At the top of the script:
+
+```python
+NUM_IMAGES_TO_GENERATE = 500
+```
+
+Change `500` to any number you want. You can also stop early at any time
+with `Ctrl+C` — it will report how many images it actually saved before
+exiting.
