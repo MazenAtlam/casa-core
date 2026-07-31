@@ -15,58 +15,82 @@ model. Pipeline:
                  the simulator starts (ROS2 is started exactly once).
     2. DETECT    Locate the 8 existing red/orange landmark markers.
     3. REMOVE    Erase them with cv2.inpaint(), leaving a clean tissue +
-                 wound image (no training data / manual masks needed for
-                 this step — pure color thresholding, same approach as
-                 the earlier jitter-augmentor script).
-    4. SEGMENT   Find the wound itself. The wound is the SAME color as the
-                 surrounding tissue (same hue/saturation) — it's a
-                 textured groove, not a differently-colored region — so
-                 plain color thresholding won't isolate it. Instead this
-                 uses a classical, no-training texture/edge-energy signal
-                 (local pixel variance) to find the "rough" band running
-                 down the tissue, then keeps only the tall/narrow blob
-                 nearest to where the removed markers used to be.
-    5. PLACE     Extracts the wound's centerline and drops NUM_LANDMARKS
-                 new markers evenly spaced along it.
+                 wound image.
+    4. SEGMENT   Find the wound itself via a local texture/roughness signal
+                 (see "WHY TEXTURE, NOT COLOR" below), independent of zoom
+                 level or wound orientation.
+    5. PLACE     Extracts the wound's centerline and drops landmarks in
+                 FLANKING PAIRS on either side of it — matching how the
+                 original markers are actually arranged — spaced evenly
+                 along its length.
     6. RE-DRAW   Pastes each new landmark using a REAL patch borrowed from
-                 one of the original (now-removed) markers — matched by
-                 vertical position, so size/perspective stays consistent
-                 down the length of the wound — for a photorealistic
-                 result with no synthetic-looking shapes.
+                 whichever original marker is closest to it, so size/
+                 shading stays consistent with the surrounding scene.
 
-WHY NOT U-NET HERE?
---------------------
-U-Net (or any supervised segmentation model) needs a training set of
-(image, ground-truth mask) pairs, which isn't available yet. This script
-uses classical CV instead — no training required, works today. If you
-later want to move to U-Net (e.g. to generalize past this exact
-simulator/phantom), the wound masks this script produces internally
-(see SAVE_DEBUG_IMAGES) can double as a starting point for auto-generated
-training labels.
+WHY TEXTURE, NOT COLOR, FOR THE WOUND
+---------------------------------------
+The wound is the SAME hue/saturation as the surrounding tissue (measured:
+both around H=150-160, S=110-135) — it's a rough, stitched groove, not a
+differently-colored region. So step 4 looks for local pixel variance
+("roughness") instead of a color difference.
 
-NOTE ON TUNING
---------------
-The HSV / texture thresholds below were tuned against a real captured
-frame from this phantom. If you change the phantom's material color,
-lighting, or camera framing significantly, re-check these values against
-a fresh sample frame the same way (sample pixel HSV values at tissue vs.
-marker vs. wound locations) before trusting the output.
+ABOUT THE DEBUG IMAGE (02_wound_mask_debug.png)
+-------------------------------------------------
+The green overlay is a DIAGNOSTIC, not part of the final output — it's
+every pixel the algorithm currently classifies as "wound texture," so you
+can visually sanity-check the segmentation. It normally looks WIDER than
+the thin visible seam, because it's genuinely capturing the whole rough/
+feathered stitch pattern on both sides of the centerline, not just a
+single line down the middle — that's expected. If it ever looks
+completely wrong (covering unrelated areas, or empty), that's the signal
+something needs re-tuning, not this image itself being an error.
+
+GENERALIZING ACROSS CAMERA POSITIONS
+--------------------------------------
+This version is built to be scale- and rotation-invariant, not hard-coded
+to one framing:
+  - Every geometric constant (erosion size, texture window, closing
+    kernel, distance gates) is computed as a FRACTION of the tissue
+    block's own detected size in the current frame, not a fixed pixel
+    count — so it adapts automatically whether the camera is zoomed in
+    or out.
+  - The wound is picked out with PCA-based elongation (major/minor axis
+    ratio), not a "must be taller than wide" bounding-box check — so it
+    still works if the camera angle makes the wound appear more
+    horizontal or diagonal, not just vertical.
+  - The centerline is extracted by projecting onto the wound's own
+    principal axis (via PCA), not by scanning image rows — so it holds
+    up regardless of the wound's orientation in the frame.
+  - The flanking offset (how far each landmark sits from the centerline)
+    is MEASURED from the real markers already in the current frame, not
+    a fixed pixel value — so it automatically matches whatever scale
+    that frame happens to be at.
+
+This gets you invariance to zoom and in-plane rotation for this same
+phantom under similar lighting — the two real captures at very different
+zoom levels behaved consistently once this was in place. It does NOT
+by itself protect against a fundamentally different lighting rig, a
+different-colored phantom, tools occluding the wound, or extreme
+near-edge-on viewing angles — classical, hand-tuned CV has a real ceiling
+there. For that level of robustness you'd want a learned model (e.g. the
+U-Net you asked about earlier), trained on a variety of captured views.
+This script's texture-based wound masks are a reasonable way to bootstrap
+that training data later — run it across many captured frames/angles and
+use the resulting masks as an initial labeled set to hand-correct.
 
 OUTPUT
 ------
     output/00_original.png            the raw captured frame
     output/01_markers_removed.png     clean tissue + wound, no markers
-    output/02_wound_mask_debug.png    visual check: wound mask overlay
+    output/02_wound_mask_debug.png    diagnostic: wound mask overlay
     output/03_final_output.png        the deliverable: clean wound with
-                                       new landmarks placed
+                                       new landmarks placed (flanking)
     output/03_final_output.json       the new landmark (x, y) coordinates
-                                       (the label the imitation-learning
-                                       model will train against)
 
 HOW TO RUN
 ----------
     source ~/ros2_ws/install/setup.bash
-    python3 wound_landmark_pipeline.py
+    python3 wound_landmark_classicalCV.py
 """
 
 # ==============================================================================
@@ -93,31 +117,23 @@ from cv_bridge import CvBridge, CvBridgeError
 # ==============================================================================
 
 CAMERA_TOPIC = "/ambf/env/stereo/left/ImageData"
-NUM_LANDMARKS = 8  # how many new landmarks to place along the wound
+NUM_LANDMARKS = 8  # total landmarks to place (must be even -> NUM_LANDMARKS/2 pairs)
 
 OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
-SAVE_DEBUG_IMAGES = True   # saves the intermediate steps too, not just the final image
-SAVE_LABELS = True         # saves a .json with the new landmark coordinates
+SAVE_DEBUG_IMAGES = True
+SAVE_LABELS = True
 
 # --- tissue mask (the phantom block itself) ---------------------------------
-# Sampled from a real frame: the magenta tissue sits around H=150-160, S=110-135,
-# with V varying by lighting. The grey floor/background has near-zero saturation,
-# so a saturation floor is enough to separate tissue from everything else.
 TISSUE_HSV_LOWER = np.array([140, 40, 0])
 TISSUE_HSV_UPPER = np.array([179, 255, 255])
-TISSUE_ERODE_PX = 15  # shrinks the tissue mask inward so block EDGES (which also
-                       # have high local texture/contrast) don't get mistaken
-                       # for the wound in the texture-based segmentation step
 
 # --- marker detection (the existing red/orange squares) ---------------------
-# Markers have a distinctly higher saturation / different hue than the
-# surrounding magenta tissue (a real, measured spike: S~200+ vs tissue S~110-135).
 MARKER_HSV_RANGES = [
     {"lower": np.array([170, 160, 0]), "upper": np.array([179, 255, 255])},
     {"lower": np.array([0, 160, 0]),   "upper": np.array([8, 255, 255])},
 ]
 MIN_MARKER_AREA = 5
-PATCH_PADDING = 4  # px of context captured around each marker for re-pasting later
+PATCH_PADDING = 4
 
 # --- inpainting (marker removal) --------------------------------------------
 INPAINT_RADIUS = 4
@@ -125,18 +141,22 @@ INPAINT_METHOD = cv2.INPAINT_TELEA
 INPAINT_MASK_DILATE_PX = 5
 INPAINT_MASK_DILATE_ITERS = 2
 
-# --- wound (texture-based) segmentation --------------------------------------
-TEXTURE_WINDOW = 9          # local-variance window size, px
-TEXTURE_PERCENTILE = 90     # pixels above this local-std percentile = "textured"
-WOUND_CLOSE_KERNEL = (5, 11)  # (w, h) — taller than wide, matches a vertical wound
-WOUND_MIN_ASPECT = 2.0      # candidate blobs must be at least this much taller than wide
+# --- wound segmentation (all scaled off the tissue block's own size) --------
+TISSUE_ERODE_FRACTION = 0.02     # keeps block edges out of the texture analysis
+TEXTURE_WINDOW_FRACTION = 0.012  # local-variance window, as a fraction of tissue diagonal
+TEXTURE_PERCENTILE = 90          # pixels above this local-std percentile = "textured"
+WOUND_CLOSE_FRACTION = 0.02      # morphological closing kernel size
+WOUND_MIN_AREA_FRACTION = 0.01   # candidate blobs smaller than this (of tissue diagonal^2) are noise
+WOUND_MIN_ELONGATION = 2.5       # PCA major/minor axis ratio -- filters out non-wound-shaped blobs
+WOUND_MAX_MARKER_DIST_FRACTION = 0.35  # candidate must be within this fraction of the tissue
+                                          # diagonal from the markers' centroid
 
 # --- re-draw ------------------------------------------------------------------
-FEATHER_BLUR_KSIZE = 3  # softens the pasted patch edge so it blends in
+FEATHER_BLUR_KSIZE = 3
 
 
 # ==============================================================================
-# ROS2 CAMERA SUBSCRIBER — started once, per the project convention
+# ROS2 CAMERA SUBSCRIBER
 # ==============================================================================
 
 class AmbfCameraSubscriber(Node):
@@ -176,7 +196,8 @@ class AmbfCameraSubscriber(Node):
 
 def segment_tissue(frame: np.ndarray) -> np.ndarray:
     """Isolates the phantom block from the grey background as one connected
-    blob — this defines the region of interest for everything downstream."""
+    blob. This also gives us a built-in ruler: the block's own size in this
+    frame, which every downstream threshold is scaled against."""
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
     mask = cv2.inRange(hsv, TISSUE_HSV_LOWER, TISSUE_HSV_UPPER)
     k3 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
@@ -184,16 +205,23 @@ def segment_tissue(frame: np.ndarray) -> np.ndarray:
 
     n, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
     if n <= 1:
-        return mask  # nothing found — return as-is, caller should handle
+        return mask
     largest = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
     return np.uint8(labels == largest) * 255
 
 
-def detect_markers(frame: np.ndarray, tissue_mask: np.ndarray) -> list:
+def tissue_scale(tissue_mask: np.ndarray) -> float:
+    """The tissue block's bounding-box diagonal, in pixels. Used as the
+    reference length for every other scale-adaptive threshold, so the
+    pipeline behaves the same whether the camera is zoomed in or out."""
+    x, y, w, h = cv2.boundingRect(tissue_mask)
+    return float(np.hypot(w, h))
+
+
+def detect_markers(frame: np.ndarray, tissue_mask: np.ndarray):
     """Finds the existing red/orange landmark squares inside the tissue
-    region. Returns a list of dicts (one per marker) with center, bbox,
-    a local shape mask, and a cropped pixel patch — everything needed to
-    both erase them and later re-paste new markers using their real look."""
+    region. Returns a list of dicts (center, bbox, local shape mask, and a
+    cropped pixel patch) plus the raw marker mask."""
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
     H, W = frame.shape[:2]
 
@@ -229,135 +257,237 @@ def detect_markers(frame: np.ndarray, tissue_mask: np.ndarray) -> list:
 
 
 def remove_markers(frame: np.ndarray, marker_mask: np.ndarray) -> np.ndarray:
-    """Erases the detected markers with cv2.inpaint(), leaving a clean
-    tissue + wound image underneath."""
+    """Erases the detected markers with cv2.inpaint()."""
     dilate_kernel = np.ones((INPAINT_MASK_DILATE_PX, INPAINT_MASK_DILATE_PX), np.uint8)
     dilated = cv2.dilate(marker_mask, dilate_kernel, iterations=INPAINT_MASK_DILATE_ITERS)
     return cv2.inpaint(frame, dilated, INPAINT_RADIUS, INPAINT_METHOD)
 
 
 # ==============================================================================
-# STEP 4 — WOUND SEGMENTATION (classical CV, no training)
+# STEP 4 — WOUND SEGMENTATION (texture-based, scale- and rotation-invariant)
 # ==============================================================================
 
 def segment_wound(clean_frame: np.ndarray, tissue_mask: np.ndarray,
-                   marker_center_x_hint: float = None) -> np.ndarray:
+                   diag: float, markers_centroid=None) -> np.ndarray:
     """
-    Finds the wound band on the (marker-free) tissue.
+    Finds the wound band on the (marker-free) tissue using local texture
+    ("roughness"), since the wound is the same color as the tissue around
+    it. Every size threshold below is a FRACTION of `diag` (the tissue
+    block's own bounding-box diagonal in this frame) rather than a fixed
+    pixel count, so this adapts automatically to zoom level.
 
-    The wound is textured (a rough groove/stitch pattern) but the SAME
-    color as the surrounding smooth tissue, so this looks for local pixel
-    variance instead of a color difference. Among the resulting candidate
-    blobs, it keeps the tall/narrow ones (aspect ratio filter) and — if a
-    hint is available from where the original markers were — picks the
-    one closest to that column, since the markers always flank the wound.
+    Candidates are then filtered by PCA-based elongation (works for a
+    wound at any angle, not just vertical) and, if available, how close
+    they are to the removed markers' centroid (the markers always flank
+    the real wound) — among survivors, the LARGEST wins, since a tiny
+    stray textured speck can otherwise be closer-but-wrong.
     """
-    tissue_core = cv2.erode(tissue_mask, np.ones((TISSUE_ERODE_PX, TISSUE_ERODE_PX), np.uint8))
+    erode_px = max(3, int(TISSUE_ERODE_FRACTION * diag))
+    tissue_core = cv2.erode(tissue_mask, np.ones((erode_px, erode_px), np.uint8))
 
+    win = max(5, int(TEXTURE_WINDOW_FRACTION * diag))
+    if win % 2 == 0:
+        win += 1
     gray = cv2.cvtColor(clean_frame, cv2.COLOR_BGR2GRAY).astype(np.float32)
-    mean = cv2.blur(gray, (TEXTURE_WINDOW, TEXTURE_WINDOW))
-    mean_sq = cv2.blur(gray * gray, (TEXTURE_WINDOW, TEXTURE_WINDOW))
-    local_std = np.sqrt(np.clip(mean_sq - mean * mean, 0, None))
-    local_std = local_std * (tissue_core > 0)
+    mean = cv2.blur(gray, (win, win))
+    mean_sq = cv2.blur(gray * gray, (win, win))
+    local_std = np.sqrt(np.clip(mean_sq - mean * mean, 0, None)) * (tissue_core > 0)
 
     valid = local_std[tissue_core > 0]
     if valid.size == 0:
         return np.zeros(tissue_mask.shape, dtype=np.uint8)
-
     thresh_val = np.percentile(valid, TEXTURE_PERCENTILE)
     wound_mask = np.uint8(local_std > thresh_val) * 255
+
+    close_px = max(3, int(WOUND_CLOSE_FRACTION * diag))
+    if close_px % 2 == 0:
+        close_px += 1
     wound_mask = cv2.morphologyEx(
-        wound_mask, cv2.MORPH_CLOSE,
-        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, WOUND_CLOSE_KERNEL)
+        wound_mask, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (close_px, close_px))
     )
     k3 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
     wound_mask = cv2.morphologyEx(wound_mask, cv2.MORPH_OPEN, k3)
 
     n, labels, stats, _ = cv2.connectedComponentsWithStats(wound_mask, 8)
-    best_label, best_score = None, None
+    min_area = max(30.0, (WOUND_MIN_AREA_FRACTION * diag) ** 2)
+    max_dist = WOUND_MAX_MARKER_DIST_FRACTION * diag
+
+    best_label, best_area = None, -1.0
     for i in range(1, n):
         x, y, w, h, area = stats[i]
-        if h < WOUND_MIN_ASPECT * w:
-            continue  # not tall/narrow enough to be the wound
-        cx = x + w / 2.0
-        dist = abs(cx - marker_center_x_hint) if marker_center_x_hint is not None else 0.0
-        score = (dist, -area)  # closest to the marker column, then largest
-        if best_score is None or score < best_score:
-            best_score, best_label = score, i
+        if area < min_area:
+            continue
+        ys, xs = np.nonzero(labels == i)
+        pts = np.column_stack([xs, ys]).astype(np.float32)
+        if len(pts) < 5:
+            continue
+        mean_pt, eigvecs, eigvals = cv2.PCACompute2(pts, mean=np.array([]))
+        eigvals = eigvals.flatten()
+        elongation = np.sqrt(max(eigvals[0], 1e-6) / max(eigvals[1], 1e-6))
+        if elongation < WOUND_MIN_ELONGATION:
+            continue
+
+        if markers_centroid is not None:
+            cx, cy = mean_pt[0]
+            dist = float(np.hypot(cx - markers_centroid[0], cy - markers_centroid[1]))
+            if dist > max_dist:
+                continue
+
+        if area > best_area:
+            best_area, best_label = area, i
 
     if best_label is None:
         return np.zeros(tissue_mask.shape, dtype=np.uint8)
-
     return np.uint8(labels == best_label) * 255
 
 
-def extract_centerline(wound_mask: np.ndarray) -> np.ndarray:
-    """Returns an ordered (N, 2) array of (x, y) points down the middle of
-    the wound mask — one point per row that contains wound pixels."""
-    rows_with_wound = np.where(wound_mask.any(axis=1))[0]
-    points = []
-    for y in rows_with_wound:
-        xs = np.where(wound_mask[y] > 0)[0]
-        points.append((xs.mean(), float(y)))
-    return np.array(points)
+def extract_centerline(wound_mask: np.ndarray, n_bins: int = 150) -> np.ndarray:
+    """
+    Returns an ordered (N, 2) array of (x, y) points down the middle of the
+    wound mask. Uses PCA to find the blob's own principal axis and
+    projects all its pixels onto that axis, so this works regardless of
+    whether the wound appears vertical, horizontal, or diagonal in frame
+    (unlike scanning image rows, which only works for near-vertical wounds).
+    """
+    ys, xs = np.nonzero(wound_mask)
+    pts = np.column_stack([xs, ys]).astype(np.float32)
+    if len(pts) < 2:
+        return pts
+
+    mean_pt, eigvecs = cv2.PCACompute(pts, mean=np.array([]))
+    principal = eigvecs[0]
+    t = (pts - mean_pt[0]) @ principal
+    order = np.argsort(t)
+    t_sorted, pts_sorted = t[order], pts[order]
+
+    bins = np.linspace(t_sorted.min(), t_sorted.max(), n_bins + 1)
+    centerline = []
+    for i in range(n_bins):
+        sel = (t_sorted >= bins[i]) & (t_sorted < bins[i + 1])
+        if np.any(sel):
+            centerline.append(pts_sorted[sel].mean(axis=0))
+    return np.array(centerline)
 
 
-def sample_evenly_along_centerline(centerline: np.ndarray, n: int) -> list:
-    """Picks n points evenly spaced by ARC LENGTH along the centerline
-    (not just evenly spaced by row index), so spacing looks natural even
-    if the wound isn't perfectly straight."""
+# ==============================================================================
+# STEP 5 — LANDMARK PLACEMENT: flanking pairs, spaced along the centerline
+# ==============================================================================
+
+def compute_flanking_offset(markers: list, centerline: np.ndarray) -> float:
+    """
+    Measures how far the REAL original markers sit from the wound
+    centerline (their median perpendicular-ish distance to the nearest
+    centerline point) and reuses that as the offset for new landmarks.
+    Because it's measured from the current frame's own markers, this
+    scales automatically with zoom level -- no fixed pixel constant needed.
+    """
+    if not markers or len(centerline) == 0:
+        return 20.0  # fallback if no markers were found to measure from
+    offsets = []
+    for m in markers:
+        mx, my = m["center"]
+        d = np.hypot(centerline[:, 0] - mx, centerline[:, 1] - my)
+        offsets.append(float(d.min()))
+    return float(np.median(offsets))
+
+
+def sample_flanking_pairs(centerline: np.ndarray, num_pairs: int, offset: float,
+                           markers: list, canvas_shape: tuple) -> list:
+    """
+    Places `num_pairs` rows at EXACTLY equal Euclidean (straight-line)
+    distance from each other, guaranteed by linear interpolation between
+    the wound's two endpoints.
+
+    The endpoints are pulled inward first by a safety margin (based on
+    the largest marker patch we might paste there) so that no landmark
+    -- especially the first/last row, which sit closest to the frame
+    edge -- ever gets its patch cropped by the image boundary. A cropped
+    patch's visible portion has a different centroid than its true
+    center, which throws off the actual on-screen spacing even when the
+    underlying target coordinates are perfectly even.
+    """
     if len(centerline) < 2:
-        return [tuple(p) for p in centerline]
+        return []
 
-    diffs = np.diff(centerline, axis=0)
-    seg_lengths = np.sqrt((diffs ** 2).sum(axis=1))
-    cum_len = np.concatenate([[0], np.cumsum(seg_lengths)])
-    total_len = cum_len[-1]
+    order = np.argsort(centerline[:, 1])
+    ordered = centerline[order]
+    p_start = ordered[0]
+    p_end = ordered[-1]
 
-    sample_targets = np.linspace(0, total_len, n)
-    points = []
-    for target in sample_targets:
-        idx = min(np.searchsorted(cum_len, target), len(centerline) - 1)
-        points.append(tuple(centerline[idx]))
-    return points
+    direction = p_end - p_start
+    total_len = np.hypot(*direction)
+    direction = direction / total_len if total_len > 1e-6 else np.array([0.0, 1.0])
+    perpendicular = np.array([-direction[1], direction[0]])
+
+    if markers:
+        max_half_diag = max(
+            np.hypot(m["bbox"][2] - m["bbox"][0], m["bbox"][3] - m["bbox"][1]) / 2.0
+            for m in markers
+        )
+    else:
+        max_half_diag = 0.0
+    margin = min(max_half_diag, 0.4 * total_len)  # cap so short wounds don't collapse
+
+    p_start = p_start + direction * margin
+    p_end = p_end - direction * margin
+
+    pairs = []
+    for i in range(num_pairs):
+        t = i / (num_pairs - 1) if num_pairs > 1 else 0.0
+        p = p_start + t * (p_end - p_start)
+        pairs.append((tuple(p - perpendicular * offset), tuple(p + perpendicular * offset)))
+    return pairs
 
 
 # ==============================================================================
 # STEP 6 — RE-DRAW: paste new landmarks using real marker pixels
 # ==============================================================================
 
-def _nearest_marker_by_y(markers: list, target_y: float) -> dict:
-    """Finds the original marker whose vertical position is closest to
-    target_y, so its patch (size/shading matching that part of the wound
-    due to perspective) can be reused for a new landmark placed there."""
-    return min(markers, key=lambda m: abs(m["center"][1] - target_y))
+def _nearest_marker(markers: list, point: tuple) -> dict:
+    """Finds the original marker closest (in image distance) to `point`,
+    so its patch can be reused for a new landmark placed there."""
+    px, py = point
+    return min(markers, key=lambda m: np.hypot(m["center"][0] - px, m["center"][1] - py))
 
 
 def draw_landmark(canvas: np.ndarray, template_marker: dict, new_center: tuple) -> None:
-    """Pastes a template marker's real pixels at a new (x, y) location,
-    using its exact shape as a feathered alpha mask so it blends in
-    cleanly instead of leaving a hard edge."""
+    """
+    Pastes a template marker's real pixels centered EXACTLY at new_center.
+
+    If the patch would extend past the image edge (this happens for
+    landmarks near the top/bottom of frame, especially larger patches
+    borrowed from markers close to the camera), only the out-of-bounds
+    sliver is cropped -- the patch is NOT shifted inward to force it
+    on-canvas. Shifting would silently move the marker's visual center
+    away from the intended coordinate (this was a real bug: a landmark
+    intended at y=477 was rendered at y~448 because its patch didn't fit
+    before the bottom edge, throwing off the actual on-screen spacing
+    even though the computed coordinates were correct).
+    """
     x0, y0, x1, y1 = template_marker["bbox"]
     w, h = x1 - x0, y1 - y0
-    old_cx, old_cy = template_marker["center"]
-
-    new_x0 = int(round(new_center[0] - w / 2))
-    new_y0 = int(round(new_center[1] - h / 2))
-    new_x1, new_y1 = new_x0 + w, new_y0 + h
-
     H, W = canvas.shape[:2]
-    new_x0 = int(np.clip(new_x0, 0, W - w))
-    new_y0 = int(np.clip(new_y0, 0, H - h))
-    new_x1, new_y1 = new_x0 + w, new_y0 + h
 
-    alpha = cv2.GaussianBlur(
+    tgt_x0 = int(round(new_center[0] - w / 2))
+    tgt_y0 = int(round(new_center[1] - h / 2))
+    tgt_x1, tgt_y1 = tgt_x0 + w, tgt_y0 + h
+
+    clip_x0, clip_y0 = max(tgt_x0, 0), max(tgt_y0, 0)
+    clip_x1, clip_y1 = min(tgt_x1, W), min(tgt_y1, H)
+    if clip_x1 <= clip_x0 or clip_y1 <= clip_y0:
+        return  # marker's center itself is off-canvas -- nothing valid to draw
+
+    src_x0, src_y0 = clip_x0 - tgt_x0, clip_y0 - tgt_y0
+    src_x1, src_y1 = src_x0 + (clip_x1 - clip_x0), src_y0 + (clip_y1 - clip_y0)
+
+    alpha_full = cv2.GaussianBlur(
         template_marker["local_mask"].astype(np.float32) / 255.0,
         (FEATHER_BLUR_KSIZE, FEATHER_BLUR_KSIZE), 0,
-    )[..., None]
-
-    region = canvas[new_y0:new_y1, new_x0:new_x1].astype(np.float32)
-    patch = template_marker["patch"].astype(np.float32)
-    canvas[new_y0:new_y1, new_x0:new_x1] = (region * (1 - alpha) + patch * alpha).astype(np.uint8)
+    )
+    alpha = alpha_full[src_y0:src_y1, src_x0:src_x1][..., None]
+    patch = template_marker["patch"][src_y0:src_y1, src_x0:src_x1].astype(np.float32)
+    region = canvas[clip_y0:clip_y1, clip_x0:clip_x1].astype(np.float32)
+    canvas[clip_y0:clip_y1, clip_x0:clip_x1] = (region * (1 - alpha) + patch * alpha).astype(np.uint8)
 
 
 # ==============================================================================
@@ -369,7 +499,6 @@ def main():
     print("  CASA — Wound Segmentation & Landmark Placement Pipeline")
     print("=" * 70)
 
-    # --- Start ROS2 exactly once ---
     print("\n[STEP 1] Initializing ROS2...")
     rclpy.init()
     camera_node = AmbfCameraSubscriber()
@@ -395,27 +524,26 @@ def main():
     if SAVE_DEBUG_IMAGES:
         cv2.imwrite(os.path.join(OUTPUT_DIR, "00_original.png"), frame)
 
-    # --- Steps 2/3: detect + remove the existing markers ---
     print("\n[STEP 2] Detecting existing landmark markers...")
     tissue_mask = segment_tissue(frame)
+    diag = tissue_scale(tissue_mask)
     markers, marker_mask = detect_markers(frame, tissue_mask)
-    print(f"[STEP 2] Found {len(markers)} marker(s).")
+    print(f"[STEP 2] Found {len(markers)} marker(s). Tissue scale (diag): {diag:.0f}px")
 
     print("[STEP 3] Removing markers with cv2.inpaint()...")
     clean_frame = remove_markers(frame, marker_mask)
     if SAVE_DEBUG_IMAGES:
         cv2.imwrite(os.path.join(OUTPUT_DIR, "01_markers_removed.png"), clean_frame)
 
-    # --- Step 4: segment the wound itself ---
-    print("[STEP 4] Segmenting the wound (texture-based, no training)...")
-    marker_center_x_hint = (
-        float(np.mean([m["center"][0] for m in markers])) if markers else None
+    print("[STEP 4] Segmenting the wound (texture-based, scale-adaptive)...")
+    markers_centroid = (
+        np.mean([m["center"] for m in markers], axis=0) if markers else None
     )
-    wound_mask = segment_wound(clean_frame, tissue_mask, marker_center_x_hint)
+    wound_mask = segment_wound(clean_frame, tissue_mask, diag, markers_centroid)
     wound_area = int((wound_mask > 0).sum())
     if wound_area == 0:
-        print("[ERROR] Could not find the wound — check TEXTURE_* / TISSUE_* "
-              "thresholds against a fresh sample frame.")
+        print("[ERROR] Could not find the wound — check the TISSUE_*/WOUND_* "
+              "fractions against a fresh sample frame.")
         rclpy.shutdown()
         sys.exit(1)
     print(f"[STEP 4] Wound segmented ({wound_area} px).")
@@ -426,20 +554,35 @@ def main():
         blended = cv2.addWeighted(clean_frame, 0.6, overlay, 0.4, 0)
         cv2.imwrite(os.path.join(OUTPUT_DIR, "02_wound_mask_debug.png"), blended)
 
-    # --- Step 5: place new landmarks along the wound's centerline ---
-    print(f"[STEP 5] Placing {NUM_LANDMARKS} landmarks along the wound centerline...")
+    print(f"[STEP 5] Placing {NUM_LANDMARKS} landmarks flanking the wound...")
     centerline = extract_centerline(wound_mask)
-    new_positions = sample_evenly_along_centerline(centerline, NUM_LANDMARKS)
+    offset = compute_flanking_offset(markers, centerline)
+    num_pairs = max(1, NUM_LANDMARKS // 2)
+    pairs = sample_flanking_pairs(centerline, num_pairs, offset, markers, frame.shape)
+    print(f"[STEP 5] Flanking offset measured at {offset:.1f}px from this frame's own markers.")
 
-    # --- Step 6: re-draw using real marker pixels ---
+    # Explicit proof, printed right here: straight-line distance between
+    # consecutive row centers. These MUST match -- that's not a claim,
+    # it's guaranteed by the linear-interpolation construction above.
+    row_centers = [ ((l[0]+r[0])/2, (l[1]+r[1])/2) for l, r in pairs ]
+    row_dists = [
+        float(np.hypot(row_centers[i+1][0]-row_centers[i][0], row_centers[i+1][1]-row_centers[i][1]))
+        for i in range(len(row_centers) - 1)
+    ]
+    print(f"[STEP 5] Row centers: {[(round(x,1), round(y,1)) for x,y in row_centers]}")
+    print(f"[STEP 5] Distance between consecutive rows (px): {[round(d, 2) for d in row_dists]}")
+
     print("[STEP 6] Drawing new landmarks with real marker pixels...")
     final_image = clean_frame.copy()
     labels_out = []
-    for (x, y) in new_positions:
-        if markers:
-            template = _nearest_marker_by_y(markers, y)
-            draw_landmark(final_image, template, (x, y))
-        labels_out.append({"x": round(float(x), 1), "y": round(float(y), 1)})
+    for left, right in pairs:
+        for point, side in ((left, "left"), (right, "right")):
+            if markers:
+                template = _nearest_marker(markers, point)
+                draw_landmark(final_image, template, point)
+            labels_out.append({"x": round(float(point[0]), 1),
+                                "y": round(float(point[1]), 1),
+                                "side": side})
 
     final_path = os.path.join(OUTPUT_DIR, "03_final_output.png")
     cv2.imwrite(final_path, final_image)
@@ -457,7 +600,15 @@ def main():
         print(f"  Intermediate steps also saved in: {OUTPUT_DIR}")
     print("=" * 70)
 
+    # Clean shutdown: destroy the node and let rclpy.shutdown() cause the
+    # background spin() call to return on its own, then join the thread.
+    # Skipping this (just calling rclpy.shutdown() and letting the daemon
+    # thread get killed at process exit) is what caused the
+    # "terminate called without an active exception / Aborted (core dumped)"
+    # crash -- the DDS middleware doesn't like being killed mid-call.
+    camera_node.destroy_node()
     rclpy.shutdown()
+    spin_thread.join(timeout=2.0)
 
 
 if __name__ == "__main__":
