@@ -1,0 +1,30 @@
+# This is the base file for Coordination Application
+# Mono camera variant - single left camera, no landmarks/ghosts
+world config: ./ADF/world/world_mono.yaml
+color config: ./ADF/color/colors.yaml
+input devices config: ./ADF/input_devices/input_devices.yaml
+
+multibody configs:
+  #3D MED PHANTOM
+  - "ADF/Phantoms/3D_MED/phantom.yaml" #0
+  - "ADF/Phantoms/3D_MED/ghosts.yaml" #1
+  #PSM LND 420006
+  - "ADF/PSMs/LND_420006/psm1.yaml" #2
+  - "ADF/PSMs/LND_420006/ghosts_actuators_psm1.yaml" #3
+  - "ADF/PSMs/LND_420006/psm2.yaml" #4
+  - "ADF/PSMs/LND_420006/ghosts_actuators_psm2.yaml" #5
+  #PSM LND 400006 SIMPLE
+  - "ADF/PSMs/LND_400006_SIMPLE/psm1.yaml" #6
+  - "ADF/PSMs/LND_400006_SIMPLE/ghosts_actuators_psm1.yaml" #7
+  - "ADF/PSMs/LND_400006_SIMPLE/psm2.yaml" #8
+  - "ADF/PSMs/LND_400006_SIMPLE/ghosts_actuators_psm2.yaml" #9
+  #SIMPLE PHANTOM
+  - "ADF/Phantoms/Simple/phantom.yaml" #10
+  - "ADF/Phantoms/Simple/ghosts.yaml" #11
+  #3D MED STRAIGHT PHANTOM
+  - "ADF/Phantoms/3D_MED_STRAIGHT/phantom.yaml" #12
+  - "ADF/Phantoms/3D_MED_STRAIGHT/ghosts.yaml" #13
+  #PEG BOARDS
+  - "ADF/Phantoms/Pegboards/pegboard_symmetric_with_wall.yaml" #14
+  - "ADF/Phantoms/Pegboards/pegboard_asymmetric.yaml" #15
+  - "ADF/Phantoms/Pegboards/camera_frame.yaml" #16
