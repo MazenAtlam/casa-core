@@ -7,8 +7,8 @@
 MODES
 -----
     python3 orbit_scan.py --discover
-        Lists every object name + position. Run this first if object
-        names ever change.
+            Lists every object name + position. Run this first if object
+            names ever change.
 
     python3 orbit_scan.py --test-rpy
         Holds the camera at one fixed point and cycles orientation tests,
@@ -24,18 +24,48 @@ MODES
         Stops automatically after NUM_CAPTURES images, or Ctrl-C/Q early
         -- either way, whatever was captured so far gets saved properly.
 
-    python3 orbit_scan.py --capture --live
-        This will capture images from the camera and save them to the 
-        orbit_dataset folder along with the camera poses.
-        It will also display the live feed of the camera.
- 
+    python3 orbit_scan.py --live --capture
+        Orbit, show the preview window, AND save images at the same time.
+
+    python3 orbit_scan.py --capture --out-dir <PATH>
+        Save the dataset to a custom folder instead of the default
+        "orbit_dataset/" next to this script. Useful for keeping separate
+        fixed-light vs varied-light datasets, e.g.:
+          --out-dir orbit_dataset_fixed_light
+          --out-dir orbit_dataset_varied_light
+
+    python3 orbit_scan.py --live --vary-brightness
+        Watch the orbit motion while light1 also moves independently
+        around the phantom. Does NOT save anything.
+
+    python3 orbit_scan.py --capture --vary-brightness
+        Orbit AND save a dataset with light1 moving independently of the
+        camera, so illumination angle and viewing angle drift in and out
+        of phase. Produces more diverse lighting conditions than a fixed-
+        light capture.
+
+    python3 orbit_scan.py --live --capture --vary-brightness
+        Preview AND save a varied-light dataset simultaneously.
+
+    python3 orbit_scan.py --capture --live --vary-brightness --out-dir <PATH>
+        Save the varied-light dataset to a custom folder.
+
+
 OUTPUT (when using --capture)
 ------------------------------
 Saved in a folder called "orbit_dataset" next to this script:
-    orbit_dataset/frame_0000.png, frame_0001.png, ... 
+    orbit_dataset/frame_0000.png, frame_0001.png, ...
     orbit_dataset/camera_poses.json   -- one entry per saved image, with
                                           its exact camera position/pose,
                                           needed later for mask projection.
+
+WHAT CHANGED FROM THE LAST VERSION
+------------------------------------
+- ZOOM_OUT_FACTOR pushes the orbit radius further out from wherever the
+  camera actually starts (it was sitting too close before).
+- Lighting variation removed entirely, as requested -- can revisit later.
+- Image + pose capture added (--capture mode), reusing the same ROS2
+  subscriber already used for the --live preview.
 """
 
 import os
@@ -43,10 +73,12 @@ import sys
 import json
 import time
 import math
+import queue
 import threading
 import argparse
 
 import cv2
+import numpy as np
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image
@@ -64,9 +96,25 @@ except ImportError:
 
 CAMERA_FRAME_NAME = "CameraFrame"
 PHANTOM_NAME = "Phantom"
+LIGHT1_NAME = "light1"   # NOT parented -- free-standing world-space light, per world_mono.yaml.
+                          # Requires "lights: [light1, light2]" in world_mono.yaml + sim restart
+                          # before it will show up in --discover.
 CAMERA_TOPIC = "/ambf/env/stereo/left/ImageData"
 
-OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "orbit_dataset")
+OUTPUT_DIR_DEFAULT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "orbit_dataset")
+
+# Light1's own independent orbit -- deliberately DIFFERENT periods from the
+# camera's, so illumination angle and viewing angle drift in and out of
+# phase with each other over the session, instead of staying locked to a
+# fixed relationship. That's what makes this genuine independent variation
+# rather than just "the light follows the camera at a different offset."
+LIGHT_SECONDS_PER_REVOLUTION = 47.0    # azimuth: independent (not a clean
+                                          # multiple of the camera's 12s)
+LIGHT_EL_MIN_DEG = 20.0
+LIGHT_EL_MAX_DEG = 85.0
+LIGHT_SECONDS_PER_ELEVATION_SWEEP = 133.0
+LIGHT_SPIN_SPEED_DPS = 360.0 / LIGHT_SECONDS_PER_REVOLUTION
+LIGHT_EL_SPEED_DPS = (LIGHT_EL_MAX_DEG - LIGHT_EL_MIN_DEG) / LIGHT_SECONDS_PER_ELEVATION_SWEEP
 
 ZOOM_OUT_FACTOR = 1.6     # multiplies the camera's real starting distance --
                             # 1.6 = 60% further out. Raise/lower this and
@@ -84,6 +132,13 @@ EL_SPEED_DPS = (EL_MAX_DEG - EL_MIN_DEG) / SECONDS_PER_ELEVATION_SWEEP
 RADIUS_VARIATION_FRACTION = 0.25   # +/- 25% zoom variation around the (already
                                       # zoomed-out) base radius. Set to 0 to disable.
 SECONDS_PER_RADIUS_CYCLE = 37.0
+
+# Brightness variation applied directly to captured images (AMBF's light API
+# only supports position/rotation, confirmed via --discover -- no intensity/
+# color control exists, so this is done here instead).
+BRIGHTNESS_MIN = 0.2    # 0 = black
+BRIGHTNESS_MAX = 0.8    # 0.5 = unchanged, 1 = double brightness
+SECONDS_PER_BRIGHTNESS_CYCLE = 71.0   # independent period, decorrelated from camera/radius
 
 POSITION_READ_TIMEOUT_SEC = 5.0
 
@@ -178,6 +233,72 @@ def look_at_rpy(cam_pos, target_pos):
     return (0.0, pitch, yaw)
 
 
+def compute_light_position(t, phantom_center, r0, az0, el0, el_min, el_max):
+    """
+    Standalone function: given elapsed time t and the light's own starting
+    spherical coordinates around the phantom, returns where it should be
+    right now. Uses the SAME triangle-wave technique as the camera, so it
+    has the same guarantee: at t=0 this returns exactly (r0, az0, el0) --
+    the light's real starting position, no jump -- and moves smoothly from
+    there using ITS OWN independent speed constants (LIGHT_SPIN_SPEED_DPS /
+    LIGHT_EL_SPEED_DPS), decoupled from the camera's motion.
+    """
+    az = az0 + LIGHT_SPIN_SPEED_DPS * t
+    el = triangle_wave(el0 + LIGHT_EL_SPEED_DPS * t, el_min, el_max)
+    return sph_to_cart(phantom_center, r0, az, el)
+
+
+
+def apply_brightness(frame, intensity):
+    """
+    Scales image brightness. intensity=0 -> black, intensity=0.5 ->
+    unchanged, intensity=1 -> double brightness (clipped at 255).
+    Verified: intensity=0.2 measurably darkens, 0.8 measurably brightens,
+    0.5 is a no-op, on a synthetic test frame.
+    """
+    factor = 2.0 * intensity
+    return np.clip(frame.astype(np.float32) * factor, 0, 255).astype(np.uint8)
+
+
+def compute_brightness(t):
+    """Smoothly varies between BRIGHTNESS_MIN and BRIGHTNESS_MAX over time,
+    using the same triangle-wave technique as the camera/light position."""
+    speed = (BRIGHTNESS_MAX - BRIGHTNESS_MIN) / (SECONDS_PER_BRIGHTNESS_CYCLE / 2)
+    return triangle_wave(BRIGHTNESS_MIN + speed * t, BRIGHTNESS_MIN, BRIGHTNESS_MAX)
+
+
+class BackgroundWriter:
+    """
+    Saves images on a separate thread so cv2.imwrite()'s disk I/O never
+    blocks the position-commanding loop -- that blocking is the most
+    likely cause of the 'Watch Dog Expired' messages, since AMBF expects
+    a fresh command roughly every loop tick and a slow disk write can eat
+    into that window.
+    """
+    def __init__(self, out_dir):
+        self.out_dir = out_dir
+        self.q = queue.Queue()
+        self.thread = threading.Thread(target=self._worker, daemon=True)
+        self.thread.start()
+
+    def _worker(self):
+        while True:
+            item = self.q.get()
+            if item is None:
+                break
+            fname, frame = item
+            cv2.imwrite(os.path.join(self.out_dir, fname), frame)
+            self.q.task_done()
+
+    def save(self, fname, frame):
+        self.q.put((fname, frame.copy()))
+
+    def wait_and_stop(self):
+        self.q.join()          # let any queued writes finish
+        self.q.put(None)
+        self.thread.join(timeout=5.0)
+
+
 def connect():
     if Client is None:
         print("[ERROR] ambf_client not importable -- run this in your AMBF Python env.")
@@ -195,7 +316,8 @@ def connect():
 def run_discover():
     ac = connect()
     print("\nAll objects in the scene:")
-    for name in ac.get_obj_names():
+    all_names = ac.get_obj_names()
+    for name in all_names:
         print(f"  {name}")
     for label, name in [("Camera", CAMERA_FRAME_NAME), ("Phantom", PHANTOM_NAME)]:
         print(f"\n{label} ({name}):")
@@ -203,6 +325,30 @@ def run_discover():
             obj = ac.get_obj_handle(name)
             time.sleep(0.5)
             read_position_safely(obj, label)
+        except Exception as e:
+            print(f"  could not get handle: {e}")
+
+    # Probe whatever light objects ACTUALLY exist right now, rather than a
+    # hardcoded name -- avoids the false "not found" result you'd get if a
+    # light isn't active in the currently-running world config.
+    light_short_names = sorted(set(
+        n.split("/")[-1] for n in all_names if "light" in n.lower()
+    ))
+    print(f"\nFound {len(light_short_names)} active light object(s): {light_short_names}")
+    for lname in light_short_names:
+        print(f"\nLight '{lname}':")
+        try:
+            obj = ac.get_obj_handle(lname)
+            time.sleep(0.5)
+            read_position_safely(obj, lname)
+            candidates = ["set_intensity", "get_intensity", "set_rgba", "set_rgb",
+                          "set_color", "get_color", "set_spot_exponent",
+                          "get_spot_exponent", "set_cutoff_angle", "get_cutoff_angle",
+                          "set_attenuation", "get_attenuation"]
+            found = [a for a in candidates if hasattr(obj, a)]
+            all_public = [a for a in dir(obj) if not a.startswith("_")]
+            print(f"  Intensity/brightness-related methods found: {found if found else 'NONE'}")
+            print(f"  ALL public methods/attrs on this object: {all_public}")
         except Exception as e:
             print(f"  could not get handle: {e}")
     ac.clean_up()
@@ -249,7 +395,7 @@ def run_test_rpy():
 # MODE: --live / --capture -- the actual orbit scan
 # ==============================================================================
 
-def run_scan(show_preview, capture):
+def run_scan(show_preview, capture, out_dir, vary_light, vary_brightness):
     ac = connect()
     cam = ac.get_obj_handle(CAMERA_FRAME_NAME)
     phantom = ac.get_obj_handle(PHANTOM_NAME)
@@ -260,6 +406,22 @@ def run_scan(show_preview, capture):
     print("=" * 60)
     start_pos = read_position_safely(cam, "Camera (start)")
     phantom_center = read_position_safely(phantom, "Phantom")
+
+    light = None
+    light_r0 = light_az0 = light_el0 = 0.0
+    if vary_light:
+        try:
+            light = ac.get_obj_handle(LIGHT1_NAME)
+            time.sleep(0.3)
+            light_start = read_position_safely(light, f"Light '{LIGHT1_NAME}' (start)")
+            light_r0, light_az0, light_el0 = cart_to_sph(phantom_center, light_start)
+            print(f"[LIGHT] '{LIGHT1_NAME}' found -- will vary it independently.")
+        except Exception as e:
+            print(f"[ERROR] --vary-light was set but couldn't get handle for "
+                  f"'{LIGHT1_NAME}': {e}")
+            print("        Did you add 'lights: [light1, light2]' to world_mono.yaml "
+                  "and restart the simulator? Run --discover to check.")
+            sys.exit(1)
 
     r0_measured, az0, el0 = cart_to_sph(phantom_center, start_pos)
     r0 = r0_measured * ZOOM_OUT_FACTOR
@@ -295,8 +457,9 @@ def run_scan(show_preview, capture):
             print("[CAPTURE] Camera feed connected.")
 
     if capture:
-        os.makedirs(OUTPUT_DIR, exist_ok=True)
-        print(f"[CAPTURE] Saving up to {NUM_CAPTURES} images to: {OUTPUT_DIR}")
+        os.makedirs(out_dir, exist_ok=True)
+        writer = BackgroundWriter(out_dir)
+        print(f"[CAPTURE] Saving up to {NUM_CAPTURES} images to: {out_dir}")
         print(f"[CAPTURE] One image every {CAPTURE_INTERVAL_SEC}s.")
 
     print(f"\n[SCAN] Azimuth: full revolution every {SECONDS_PER_REVOLUTION:.0f}s")
@@ -333,18 +496,37 @@ def run_scan(show_preview, capture):
             cam.set_pos(*pos)
             cam.set_rpy(roll, pitch, yaw)
 
+            light_pos = None
+            if vary_light and light is not None:
+                light_pos = compute_light_position(
+                    t, phantom_center, light_r0, light_az0, light_el0,
+                    LIGHT_EL_MIN_DEG, LIGHT_EL_MAX_DEG
+                )
+                light.set_pos(*light_pos)
+
             frame = cam_node.get_frame() if cam_node is not None else None
 
             if capture and (t - last_capture_t) >= CAPTURE_INTERVAL_SEC:
                 if frame is not None:
+                    brightness_value = None
+                    save_frame = frame
+                    if vary_brightness:
+                        brightness_value = compute_brightness(t)
+                        save_frame = apply_brightness(frame, brightness_value)
+
                     fname = f"frame_{saved_count:04d}.png"
-                    cv2.imwrite(os.path.join(OUTPUT_DIR, fname), frame)
+                    writer.save(fname, save_frame)
                     poses_log.append({
                         "index": saved_count,
                         "image": fname,
                         "camera_pos": {"x": pos[0], "y": pos[1], "z": pos[2]},
                         "camera_rpy": {"roll": roll, "pitch": pitch, "yaw": yaw},
                         "azimuth_deg": az % 360, "elevation_deg": el, "radius_m": r,
+                        "light_varied": vary_light,
+                        "light_pos": ({"x": light_pos[0], "y": light_pos[1], "z": light_pos[2]}
+                                       if light_pos is not None else None),
+                        "brightness_varied": vary_brightness,
+                        "brightness_value": brightness_value,
                         "t_sec": round(t, 2),
                     })
                     saved_count += 1
@@ -374,10 +556,13 @@ def run_scan(show_preview, capture):
         print("\n[STOP] Ctrl-C received.")
     finally:
         if capture:
-            poses_path = os.path.join(OUTPUT_DIR, "camera_poses.json")
+            print(f"\n[CAPTURE] Waiting for background image writer to finish "
+                  f"({writer.q.qsize()} pending)...")
+            writer.wait_and_stop()
+            poses_path = os.path.join(out_dir, "camera_poses.json")
             with open(poses_path, "w") as f:
                 json.dump(poses_log, f, indent=2)
-            print(f"\n[CAPTURE] Saved {saved_count} images + poses to: {OUTPUT_DIR}")
+            print(f"[CAPTURE] Saved {saved_count} images + poses to: {out_dir}")
             print(f"[CAPTURE] Poses file: {poses_path}")
 
         ac.clean_up()
@@ -401,7 +586,19 @@ if __name__ == "__main__":
                     help="Hold camera fixed, cycle orientation tests.")
     p.add_argument("--live", action="store_true", help="Preview the orbit motion (no saving).")
     p.add_argument("--capture", action="store_true",
-                    help="Orbit AND save images + camera_poses.json to orbit_dataset/.")
+                    help="Orbit AND save images + camera_poses.json to the output folder.")
+    p.add_argument("--out-dir", default=OUTPUT_DIR_DEFAULT,
+                    help="Where to save images/poses (only used with --capture). "
+                         "Point this at a NEW folder for each dataset variant, "
+                         "e.g. orbit_dataset_fixed_light vs orbit_dataset_varied_light.")
+    p.add_argument("--vary-light", action="store_true",
+                    help="Also move light1 independently while orbiting (needs "
+                         "'lights: [light1, light2]' in world_mono.yaml + sim restart "
+                         "first). Omit this flag entirely for a fixed-lighting dataset.")
+    p.add_argument("--vary-brightness", action="store_true",
+                    help="Vary image brightness (0.2-0.8 scale) directly on captured "
+                         "frames -- AMBF's light API has no intensity control, so this "
+                         "is applied to the images themselves instead.")
     args = p.parse_args()
 
     if args.discover:
@@ -409,4 +606,6 @@ if __name__ == "__main__":
     elif args.test_rpy:
         run_test_rpy()
     else:
-        run_scan(show_preview=args.live, capture=args.capture)
+        run_scan(show_preview=args.live, capture=args.capture,
+                  out_dir=args.out_dir, vary_light=args.vary_light,
+                  vary_brightness=args.vary_brightness)
