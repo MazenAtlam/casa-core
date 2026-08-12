@@ -25,10 +25,7 @@ casa_app/surgical_robotics_challenge/
 # Ensure these aren't accidentally committed as raw binaries
 *.OBJ
 *.STL
-*.png
-*.jpg
 *.dae
-*.json
 
 # --- OS Specific ---
 Thumbs.db
