@@ -55,9 +55,19 @@ OUTPUT (when using --capture)
 ------------------------------
 Saved in a folder called "orbit_dataset" next to this script:
     orbit_dataset/frame_0000.png, frame_0001.png, ...
-    orbit_dataset/camera_poses.json   -- one entry per saved image, with
-                                          its exact camera position/pose,
-                                          needed later for mask projection.
+    orbit_dataset/camera_poses.json   -- JSON object with two top-level
+                                          keys:
+                                            "phantom_rotation_rpy" -- the
+                                              phantom's roll/pitch/yaw at
+                                              scan start (constant for
+                                              the whole run), needed to
+                                              transform wound_faces.json
+                                              from local to world space.
+                                            "frames" -- one entry per
+                                              saved image, with its exact
+                                              camera position/pose,
+                                              needed later for mask
+                                              projection.
 
 WHAT CHANGED FROM THE LAST VERSION
 ------------------------------------
@@ -121,7 +131,7 @@ ZOOM_OUT_FACTOR = 1.6     # multiplies the camera's real starting distance --
                             # re-run if it's still too close/far.
 
 SECONDS_PER_REVOLUTION = 12.0        # fast: one full left-right spin every 12s
-SECONDS_PER_ELEVATION_SWEEP = 240.0  # slow: ~20 full spins happen at each height
+SECONDS_PER_ELEVATION_SWEEP = 233.0  # slow: ~19.4 full spins happen at each height
 EL_MIN_DEG = 10.0
 EL_MAX_DEG = 80.0
 COMMAND_HZ = 100          # how often to send position commands (AMBF watchdog)
@@ -192,6 +202,26 @@ def read_position_safely(obj, label, timeout=POSITION_READ_TIMEOUT_SEC):
     print(f"[WARN] Could not get a real reading for {label} after {timeout}s.")
     return (0.0, 0.0, 0.0)
 
+def read_rotation_safely(obj, label, timeout=POSITION_READ_TIMEOUT_SEC):
+    """
+    Mimics read_position_safely to extract the Roll, Pitch, Yaw (RPY) 
+    rotation of an AMBF object.
+    """
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        try:
+            rpy = obj.get_rpy()
+            # If the API returns a valid 3-element array, log and return it
+            if rpy is not None and len(rpy) == 3:
+                print(f"[OK] {label} rotation (RPY): "
+                      f"({rpy[0]:.4f}, {rpy[1]:.4f}, {rpy[2]:.4f})")
+                return (rpy[0], rpy[1], rpy[2])
+        except Exception:
+            pass
+        time.sleep(0.1)
+        
+    print(f"[WARN] Could not get a real rotation reading for {label} after {timeout}s.")
+    return (0.0, 0.0, 0.0)
 
 def cart_to_sph(center, pos):
     dx, dy, dz = pos[0] - center[0], pos[1] - center[1], pos[2] - center[2]
@@ -406,6 +436,7 @@ def run_scan(show_preview, capture, out_dir, vary_light, vary_brightness):
     print("=" * 60)
     start_pos = read_position_safely(cam, "Camera (start)")
     phantom_center = read_position_safely(phantom, "Phantom")
+    phantom_rotation = read_rotation_safely(phantom, "Phantom")
 
     light = None
     light_r0 = light_az0 = light_el0 = 0.0
@@ -561,9 +592,17 @@ def run_scan(show_preview, capture, out_dir, vary_light, vary_brightness):
             writer.wait_and_stop()
             poses_path = os.path.join(out_dir, "camera_poses.json")
             with open(poses_path, "w") as f:
-                json.dump(poses_log, f, indent=2)
+                json.dump({
+                    "phantom_rotation_rpy": {
+                        "roll": phantom_rotation[0],
+                        "pitch": phantom_rotation[1],
+                        "yaw": phantom_rotation[2],
+                    },
+                    "frames": poses_log,
+                }, f, indent=2)
             print(f"[CAPTURE] Saved {saved_count} images + poses to: {out_dir}")
             print(f"[CAPTURE] Poses file: {poses_path}")
+            print(f"[CAPTURE] Phantom rotation (RPY) saved: {phantom_rotation}")
 
         ac.clean_up()
         if need_ros:
