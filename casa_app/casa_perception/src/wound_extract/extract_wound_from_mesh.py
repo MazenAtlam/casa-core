@@ -49,17 +49,22 @@ HOW IT WORKS
 HOW TO RUN
 ----------
     pip install numpy scipy matplotlib --break-system-packages   # if not already present
-    python3 extract_wound_from_mesh.py ../../casa_app/surgical_robotics_challenge/ADF/Phantoms/Simple/high_res/Phantom.OBJ --out-json wound_faces_simple.json --out-preview wound_mesh_preview_simple.png
+    python3 extract_wound_from_mesh.py ../../../surgical_robotics_challenge/ADF/Phantoms/Simple/high_res/Phantom.OBJ --out-json wound_faces_simple.json --out-preview wound_mesh_preview_simple.png
+
+    Outputs are always written to output/ next to this script, regardless of
+    the working directory. The directory is created automatically if missing.
 
 OUTPUT
 ------
-    wound_faces.json     -- list of face indices (into the OBJ's face
-                             list) that make up the wound. This is the
-                             file the future mask-projection step needs.
-    wound_mesh_preview.png -- top-down visualization for a manual sanity
-                             check before trusting the result.
+    output/wound_faces.json       -- list of face indices (into the OBJ's
+                                     face list) that make up the wound.
+                                     This is the file the future mask-
+                                     projection step needs.
+    output/wound_mesh_preview.png -- top-down visualization for a manual
+                                     sanity check before trusting the result.
 """
 
+import os
 import sys
 import json
 import argparse
@@ -185,11 +190,22 @@ def merge_nearby_fragments(verts, components, merge_dist):
 # ==============================================================================
 
 def main():
+    SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+    OUTPUT_DIR = os.path.join(SCRIPT_DIR, "output")
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+
     parser = argparse.ArgumentParser()
     parser.add_argument("obj_path", help="Path to the phantom's .OBJ file")
-    parser.add_argument("--out-json", default="wound_faces.json")
-    parser.add_argument("--out-preview", default="wound_mesh_preview.png")
+    parser.add_argument("--out-json", default="wound_faces.json",
+                        help="Output JSON filename (saved inside output/ next to this script).")
+    parser.add_argument("--out-preview", default="wound_mesh_preview.png",
+                        help="Output preview PNG filename (saved inside output/ next to this script).")
     args = parser.parse_args()
+
+    # Always resolve outputs relative to the script's own output/ directory,
+    # regardless of the caller's working directory.
+    out_json    = os.path.join(OUTPUT_DIR, os.path.basename(args.out_json))
+    out_preview = os.path.join(OUTPUT_DIR, os.path.basename(args.out_preview))
 
     print(f"[1/5] Parsing {args.obj_path} ...")
     verts, faces = parse_obj(args.obj_path)
@@ -222,7 +238,7 @@ def main():
             wound_faces.append(fi)
     print(f"      {len(wound_faces)} wound faces identified")
 
-    with open(args.out_json, "w") as f:
+    with open(out_json, "w") as f:
         json.dump({
             "obj_path": args.obj_path,
             "wound_face_indices": [int(i) for i in wound_faces],
@@ -230,7 +246,7 @@ def main():
             "curvature_percentile_used": CURVATURE_PERCENTILE,
             "merge_dist": MERGE_DIST,
         }, f, indent=2)
-    print(f"[5/5] Saved: {args.out_json}")
+    print(f"[5/5] Saved: {out_json}")
 
     # visualization for a manual sanity check
     mask = np.zeros(len(verts), dtype=bool)
@@ -242,8 +258,8 @@ def main():
     ax.set_title(f"Identified wound region ({mask.sum()} vertices, "
                  f"{len(wound_faces)} faces)")
     plt.tight_layout()
-    plt.savefig(args.out_preview, dpi=120)
-    print(f"      Saved preview: {args.out_preview}")
+    plt.savefig(out_preview, dpi=120)
+    print(f"      Saved preview: {out_preview}")
     print("\nLook at that preview image before trusting this -- it should be a")
     print("clean line/shape matching the wound, not scattered noise or the")
     print("block's outline. If it looks wrong, CURVATURE_PERCENTILE or")

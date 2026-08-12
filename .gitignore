@@ -25,10 +25,7 @@ casa_app/surgical_robotics_challenge/
 # Ensure these aren't accidentally committed as raw binaries
 *.OBJ
 *.STL
-*.png
-*.jpg
 *.dae
-*.json
 
 # --- OS Specific ---
 Thumbs.db
@@ -37,3 +34,6 @@ Desktop.ini
 # --- Frequently Changing Files ---
 src/casa_autonomy_stack/data/expert_demonstrations/
 casa_app/casa_autonomy_stack/data/expert_demonstrations/
+
+# --- Datasets ---
+casa_app/casa_perception/dataset/raw/
