@@ -55,14 +55,20 @@ OUTPUT (when using --capture)
 ------------------------------
 Saved in a folder called "orbit_dataset" next to this script:
     orbit_dataset/frame_0000.png, frame_0001.png, ...
-    orbit_dataset/camera_poses.json   -- JSON object with two top-level
+    orbit_dataset/camera_poses.json   -- JSON object with three top-level
                                           keys:
+                                            "phantom_position" -- the
+                                              phantom's x/y/z at scan
+                                              start (constant for the
+                                              whole run).
                                             "phantom_rotation_rpy" -- the
                                               phantom's roll/pitch/yaw at
                                               scan start (constant for
-                                              the whole run), needed to
-                                              transform wound_faces.json
-                                              from local to world space.
+                                              the whole run). Together
+                                              with phantom_position, used
+                                              to transform
+                                              wound_faces.json from local
+                                              to world space.
                                             "frames" -- one entry per
                                               saved image, with its exact
                                               camera position/pose,
@@ -593,6 +599,11 @@ def run_scan(show_preview, capture, out_dir, vary_light, vary_brightness):
             poses_path = os.path.join(out_dir, "camera_poses.json")
             with open(poses_path, "w") as f:
                 json.dump({
+                    "phantom_position": {
+                        "x": phantom_center[0],
+                        "y": phantom_center[1],
+                        "z": phantom_center[2],
+                    },
                     "phantom_rotation_rpy": {
                         "roll": phantom_rotation[0],
                         "pitch": phantom_rotation[1],
@@ -602,6 +613,7 @@ def run_scan(show_preview, capture, out_dir, vary_light, vary_brightness):
                 }, f, indent=2)
             print(f"[CAPTURE] Saved {saved_count} images + poses to: {out_dir}")
             print(f"[CAPTURE] Poses file: {poses_path}")
+            print(f"[CAPTURE] Phantom position saved: {phantom_center}")
             print(f"[CAPTURE] Phantom rotation (RPY) saved: {phantom_rotation}")
 
         ac.clean_up()
