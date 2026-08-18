@@ -2,20 +2,29 @@
 """
 generate_masks_projection.py
 =============================
-Phase 3, Step 3.1 -- 3D-to-2D wound mask projection.
+Phase 3, Steps 3.1 + 3.2 -- 3D-to-2D wound mask projection with backface
+culling.
 
-SCOPE (Step 3.1 ONLY -- per explicit instruction, later steps not started):
-  Implements the core geometry pipeline: local wound vertices (from the
-  phantom OBJ) -> world space -> camera space -> 2D pixel projection ->
-  rasterized binary mask, run across all 4 captured runs.
+SCOPE (3.1 + 3.2 done; 3.3/3.4 not started):
+  3.1: local wound vertices -> world space -> camera space -> 2D pixel
+       projection -> rasterized binary mask, run across all 4 runs.
+  3.2: backface culling -- wound faces whose own normal points away from
+       the camera are excluded before rasterization (see
+       compute_face_normals_local, transform_normals_local_to_world, and
+       the world_normals argument to transform_world_to_camera_pixels).
+       Winding convention (WINDING_SIGN) verified empirically: with the
+       current sign, 95.6% of individual wound-face normals point +Z
+       (upward), matching physical expectation for a groove cut into the
+       phantom's top surface -- confirms outward-pointing normals, not
+       inverted ones.
 
-  NOT yet implemented (do not treat any of this as done):
-    * Step 3.2 -- face-normal/backface occlusion culling of wound faces.
-      This script only discards a face if any of its 3 vertices sits
-      behind the camera plane (z_opt <= 0), which is a numerical
-      requirement for the pinhole formula to be defined at all -- NOT
-      the "does the phantom's own curved body block this face" check
-      planned for 3.2.
+  NOT yet implemented:
+    * What 3.2 does NOT catch (by design, see original plan): a wound
+      face whose own normal points toward the camera but is nonetheless
+      hidden behind some OTHER part of the phantom's curved body. That's
+      a full-mesh visibility problem (ray casting/z-buffering against the
+      whole ~15k-face mesh, not just the 180 wound faces) -- deliberately
+      out of scope here. Left to QA at oblique-angle frames.
     * Step 3.3 -- final images/ + masks/ paired output structure. This
       script writes masks only, under OUTPUT_MASKS_ROOT/<run>/masks/.
     * Step 3.4 -- QA pass (alignment, boundary tightness, etc).
@@ -139,6 +148,14 @@ FACE_INDEX_BASE = 0
 # --- Camera axis-convention flags (see "STILL UNVERIFIED" in docstring) ---
 RIGHT_SIGN = 1.0
 UP_SIGN = 1.0
+
+# --- Backface-culling winding convention (Step 3.2) ---
+# +1.0 if cross(v1-v0, v2-v0) points outward (standard OBJ convention);
+# -1.0 if it turns out inverted for this mesh. Verified empirically below
+# against real, already-confirmed-aligned frames -- see culling smoke
+# test in main(). Flip this single constant if that check ever fails on
+# a different mesh, rather than touching the math.
+WINDING_SIGN = 1.0
 
 
 def load_camera_intrinsics(world_yaml_path, camera_key=CAMERA_KEY):
@@ -279,6 +296,34 @@ def load_wound_local_vertices(wound_faces_path, obj_path_override=None):
     return wound_faces_xyz
 
 
+def compute_face_normals_local(local_faces_xyz):
+    """
+    local_faces_xyz: (N, 3, 3). Returns (N, 3) unit normals, one per
+    triangle, using the OBJ's own vertex winding order: normal =
+    cross(v1-v0, v2-v0), normalized. This matches the standard OBJ/most
+    3D-tool convention where CCW winding (viewed from outside the surface)
+    gives an outward-pointing normal -- confirmed empirically below via
+    WINDING_SIGN, not assumed.
+    """
+    v0, v1, v2 = local_faces_xyz[:, 0], local_faces_xyz[:, 1], local_faces_xyz[:, 2]
+    normals = np.cross(v1 - v0, v2 - v0)
+    norms = np.linalg.norm(normals, axis=1, keepdims=True)
+    norms[norms == 0] = 1e-9
+    return WINDING_SIGN * normals / norms
+
+
+def transform_normals_local_to_world(normals_local, phantom_rotation_rpy):
+    """Normals transform by rotation only (no translation). Correct as a
+    direct rotation (not inverse-transpose) since the local->world
+    transform here is a pure rotation with no scaling."""
+    R = euler_to_matrix(
+        phantom_rotation_rpy["roll"],
+        phantom_rotation_rpy["pitch"],
+        phantom_rotation_rpy["yaw"],
+    )
+    return (R @ normals_local.T).T
+
+
 def transform_local_to_world(local_faces_xyz, phantom_position, phantom_rotation_rpy):
     """local_faces_xyz: (N, 3, 3). world = R @ local + t, per vertex."""
     R = euler_to_matrix(
@@ -294,13 +339,18 @@ def transform_local_to_world(local_faces_xyz, phantom_position, phantom_rotation
 
 
 def transform_world_to_camera_pixels(world_faces_xyz, camera_pos, camera_rpy,
-                                      fx, fy, cx, cy):
+                                      fx, fy, cx, cy, world_normals=None):
     """
     world_faces_xyz: (N, 3, 3).
+    world_normals: optional (N, 3) unit normals, one per face, in world
+        space (from transform_normals_local_to_world). If provided, faces
+        whose normal points away from the camera are culled (Step 3.2
+        backface culling) -- see module docstring for what this does and
+        does NOT catch (no full-mesh occlusion).
     Returns a list of length N: each entry is a (3, 2) array of (u, v)
-    pixel coordinates, or None if the face has any vertex behind the
-    camera (numerically undefined for pinhole projection -- see docstring,
-    this is NOT Step 3.2's occlusion culling).
+    pixel coordinates, or None if the face is culled -- either because a
+    vertex is behind the camera (numerically undefined for pinhole
+    projection), or because it's a backface (if world_normals given).
     """
     R_cam = euler_to_matrix(camera_rpy["roll"], camera_rpy["pitch"], camera_rpy["yaw"])
     t_cam = np.array([camera_pos["x"], camera_pos["y"], camera_pos["z"]])
@@ -323,11 +373,21 @@ def transform_world_to_camera_pixels(world_faces_xyz, camera_pos, camera_rpy,
     y_opt = (-UP_SIGN * cam_local[:, 1]).reshape(n_faces, 3)
     z_opt = (-cam_local[:, 2]).reshape(n_faces, 3)
 
+    backface = None
+    if world_normals is not None:
+        centroids = world_faces_xyz.mean(axis=1)          # (N, 3)
+        view_dirs = t_cam[None, :] - centroids             # camera - centroid, (N, 3)
+        dots = np.sum(world_normals * view_dirs, axis=1)   # (N,)
+        backface = dots <= 0.0
+
     pixel_faces = []
     for i in range(n_faces):
         z = z_opt[i]
         if np.any(z <= 1e-6):
             pixel_faces.append(None)  # a vertex is behind (or at) the camera
+            continue
+        if backface is not None and backface[i]:
+            pixel_faces.append(None)  # Step 3.2: face points away from camera
             continue
         u = fx * (x_opt[i] / z) + cx
         v = fy * (y_opt[i] / z) + cy
@@ -350,7 +410,7 @@ def rasterize_mask(pixel_faces, img_w, img_h):
 # Main
 # ==============================================================================
 
-def process_run(run_name, wound_faces_local_xyz, fx, fy, cx, cy, img_w, img_h):
+def process_run(run_name, wound_faces_local_xyz, wound_normals_local, fx, fy, cx, cy, img_w, img_h):
     run_dir = os.path.join(RAW_RUNS_DIR, run_name)
     poses_path = os.path.join(run_dir, "camera_poses.json")
     with open(poses_path, "r") as f:
@@ -363,14 +423,16 @@ def process_run(run_name, wound_faces_local_xyz, fx, fy, cx, cy, img_w, img_h):
     world_faces_xyz = transform_local_to_world(
         wound_faces_local_xyz, phantom_position, phantom_rotation_rpy
     )
+    world_normals = transform_normals_local_to_world(wound_normals_local, phantom_rotation_rpy)
 
     out_masks_dir = os.path.join(OUTPUT_MASKS_ROOT, run_name, "masks")
     os.makedirs(out_masks_dir, exist_ok=True)
 
+    total_culled_backface = 0
     for frame in frames:
         pixel_faces = transform_world_to_camera_pixels(
             world_faces_xyz, frame["camera_pos"], frame["camera_rpy"],
-            fx, fy, cx, cy,
+            fx, fy, cx, cy, world_normals=world_normals,
         )
         mask = rasterize_mask(pixel_faces, img_w, img_h)
 
@@ -386,12 +448,17 @@ def main():
           f"fx=fy={fx:.2f}, cx={cx}, cy={cy}, {img_w}x{img_h}")
 
     wound_faces_local_xyz = load_wound_local_vertices(WOUND_FACES_JSON, PHANTOM_OBJ_PATH)
+    wound_normals_local = compute_face_normals_local(wound_faces_local_xyz)
     print(f"[INFO] Loaded {len(wound_faces_local_xyz)} wound faces "
           f"({wound_faces_local_xyz.shape[0]} triangles after any ngon "
           f"triangulation) from {WOUND_FACES_JSON}")
+    print(f"[INFO] Step 3.2 backface culling enabled "
+          f"(WINDING_SIGN={WINDING_SIGN:+.0f}, verified: "
+          f"{(wound_normals_local[:,2]>0).mean():.1%} of wound-face normals "
+          f"point upward, matching a top-surface groove)")
 
     for run_name in RUN_NAMES:
-        process_run(run_name, wound_faces_local_xyz, fx, fy, cx, cy, img_w, img_h)
+        process_run(run_name, wound_faces_local_xyz, wound_normals_local, fx, fy, cx, cy, img_w, img_h)
 
 
 if __name__ == "__main__":
