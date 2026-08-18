@@ -165,6 +165,10 @@ POSITION_READ_TIMEOUT_SEC = 5.0
 
 # --- capture settings (only used in --capture mode) ---
 CAPTURE_INTERVAL_SEC = 1.0   # save one frame this often
+FIRST_FRAME_SETTLE_SEC = 0.5 # extra settle time before frame 0 specifically,
+                              # so its pose command has time to actually
+                              # render/publish before being captured (see
+                              # note at last_capture_t init in run_scan)
 NUM_CAPTURES = 500           # auto-stop after this many images
 
 
@@ -578,7 +582,15 @@ def run_scan(show_preview, capture, out_dir, vary_light, vary_brightness):
 
     dt = 1.0 / COMMAND_HZ
     t0 = time.time()
-    last_capture_t = -999.0
+    # NOTE: frame 0 gets zero settle time between its pose command and the
+    # capture-eligibility check below, unlike every later frame (which gets
+    # ~1s of continuous small pose updates first). If the renderer/publisher
+    # hasn't caught up yet, cam_node.get_frame() can return a stale image
+    # while camera_poses.json records the pose that was just commanded --
+    # image and metadata silently desync for exactly that one frame. Delay
+    # the first eligible capture time to give the very first commanded pose
+    # real settle time, matching every other frame's implicit settle window.
+    last_capture_t = -999.0 if not capture else -(CAPTURE_INTERVAL_SEC - FIRST_FRAME_SETTLE_SEC)
     saved_count = 0
     poses_log = []
 

@@ -311,18 +311,16 @@ def transform_world_to_camera_pixels(world_faces_xyz, camera_pos, camera_rpy,
     # world -> camera-local (right=+X, up=+Y, forward=-Z convention)
     cam_local = (R_cam.T @ (flat - t_cam).T).T
 
-    # camera-local -> pinhole/optical convention (+X right, +Y down, +Z forward)
-    # CONFIRMED FIX (was: x_opt from local_X, y_opt from local_Y) -- verified
-    # against real run_01/frame_0000 camera_rpy: the original mapping produced
-    # an exactly-horizontal mask for a wound that is exactly vertical in the
-    # raw frame at this orientation. Swapping which local axis feeds u vs v
-    # is a pure relabeling of the same projected points, so it's guaranteed
-    # correct for that frame regardless of the wound's actual 3D direction --
-    # and since this is a fixed camera-axis convention (not frame-dependent),
-    # it should hold for all frames. RIGHT_SIGN/UP_SIGN remain the knobs for
-    # any residual mirroring you spot during re-verification.
-    x_opt = (RIGHT_SIGN * cam_local[:, 1]).reshape(n_faces, 3)
-    y_opt = (-UP_SIGN * cam_local[:, 0]).reshape(n_faces, 3)
+    # RESOLVED via --calibrate (known fixed camera position, known rpy, real
+    # rendered frames -- zero ambiguity): x_opt=local_X, y_opt=-local_Y is
+    # CORRECT. The earlier "swap" was wrong -- it was fit to frame_0000,
+    # which turned out to be a bad reference frame (see orbit_scan.py fix:
+    # frame_0000 was captured with zero settle time after its pose command,
+    # letting image and pose metadata desync for that one frame only).
+    # Confirmed consistent across: calib identity, calib yaw_p90, and
+    # frame_0001, using real wound geometry and real camera poses.
+    x_opt = (RIGHT_SIGN * cam_local[:, 0]).reshape(n_faces, 3)
+    y_opt = (-UP_SIGN * cam_local[:, 1]).reshape(n_faces, 3)
     z_opt = (-cam_local[:, 2]).reshape(n_faces, 3)
 
     pixel_faces = []
