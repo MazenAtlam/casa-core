@@ -23,7 +23,6 @@ casa_app/surgical_robotics_challenge/
 
 # --- Large Files Managed by LFS ---
 # Ensure these aren't accidentally committed as raw binaries
-*.OBJ
 *.STL
 *.dae
 
