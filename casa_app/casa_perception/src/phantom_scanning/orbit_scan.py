@@ -34,10 +34,10 @@ MODES
 
     python3 orbit_scan.py [--capture | --calibrate] --out-dir <PATH>
         Save the dataset to a custom folder instead of the default
-        "orbit_dataset/" next to this script. Useful for keeping separate
-        fixed-light vs varied-light datasets, e.g.:
-          --out-dir orbit_dataset_fixed_light
-          --out-dir orbit_dataset_varied_light
+        Step 3.3 convention: point --out-dir at .../run_XX/images directly 
+        (the wrapper script capture_all_runs.sh does this for you across all
+        4 runs) -- images and frame_poses.json land together in that
+        folder.
 
     python3 orbit_scan.py --live --vary-brightness
         Watch the orbit motion while light1 also moves independently
@@ -58,27 +58,28 @@ MODES
 
 OUTPUT (when using --capture)
 ------------------------------
-Saved in a folder called "orbit_dataset" next to this script:
-    orbit_dataset/frame_0000.png, frame_0001.png, ...
-    orbit_dataset/camera_poses.json   -- JSON object with three top-level
-                                          keys:
-                                            "phantom_position" -- the
-                                              phantom's x/y/z at scan
-                                              start (constant for the
-                                              whole run).
-                                            "phantom_rotation_rpy" -- the
-                                              phantom's roll/pitch/yaw at
-                                              scan start (constant for
-                                              the whole run). Together
-                                              with phantom_position, used
-                                              to transform
-                                              wound_faces.json from local
-                                              to world space.
-                                            "frames" -- one entry per
-                                              saved image, with its exact
-                                              camera position/pose,
-                                              needed later for mask
-                                              projection.
+Saved next to the script or into --out-dir if provided (Step 3.3 convention:
+dataset/processed/run_XX/images/, one run per directory):
+    <out-dir>/frame_0000.png, frame_0001.png, ...
+    <out-dir>/frame_poses.json   -- JSON object with three top-level
+                                     keys:
+                                       "phantom_position" -- the
+                                         phantom's x/y/z at scan
+                                         start (constant for the
+                                         whole run).
+                                       "phantom_rotation_rpy" -- the
+                                         phantom's roll/pitch/yaw at
+                                         scan start (constant for
+                                         the whole run). Together
+                                         with phantom_position, used
+                                         to transform
+                                         wound_faces.json from local
+                                         to world space.
+                                       "frames" -- one entry per
+                                         saved image, with its exact
+                                         camera position/pose,
+                                         needed later for mask
+                                         projection.
 
 WHAT CHANGED FROM THE LAST VERSION
 ------------------------------------
@@ -586,7 +587,7 @@ def run_scan(show_preview, capture, out_dir, vary_light, vary_brightness):
     # capture-eligibility check below, unlike every later frame (which gets
     # ~1s of continuous small pose updates first). If the renderer/publisher
     # hasn't caught up yet, cam_node.get_frame() can return a stale image
-    # while camera_poses.json records the pose that was just commanded --
+    # while frame_poses.json records the pose that was just commanded --
     # image and metadata silently desync for exactly that one frame. Delay
     # the first eligible capture time to give the very first commanded pose
     # real settle time, matching every other frame's implicit settle window.
@@ -677,7 +678,7 @@ def run_scan(show_preview, capture, out_dir, vary_light, vary_brightness):
             print(f"\n[CAPTURE] Waiting for background image writer to finish "
                   f"({writer.q.qsize()} pending)...")
             writer.wait_and_stop()
-            poses_path = os.path.join(out_dir, "camera_poses.json")
+            poses_path = os.path.join(out_dir, "frame_poses.json")
             with open(poses_path, "w") as f:
                 json.dump({
                     "phantom_position": {
@@ -722,7 +723,7 @@ if __name__ == "__main__":
                          "use this to actually resolve the camera axis convention.")
     p.add_argument("--live", action="store_true", help="Preview the orbit motion (no saving).")
     p.add_argument("--capture", action="store_true",
-                    help="Orbit AND save images + camera_poses.json to the output folder.")
+                    help="Orbit AND save images + frame_poses.json to the output folder.")
     p.add_argument("--out-dir", default=OUTPUT_DIR_DEFAULT,
                     help="Where to save images/poses (only used with --capture). "
                          "Point this at a NEW folder for each dataset variant, "

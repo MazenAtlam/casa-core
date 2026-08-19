@@ -26,7 +26,7 @@ SCOPE (3.1 + 3.2 done; 3.3/3.4 not started):
       whole ~15k-face mesh, not just the 180 wound faces) -- deliberately
       out of scope here. Left to QA at oblique-angle frames.
     * Step 3.3 -- final images/ + masks/ paired output structure. This
-      script writes masks only, under OUTPUT_MASKS_ROOT/<run>/masks/.
+      script writes masks only, under DATASET_DIR/<run>/masks/.
     * Step 3.4 -- QA pass (alignment, boundary tightness, etc).
 
 CONFIRMED SCHEMA (from the real wound_faces_simple.json):
@@ -67,14 +67,17 @@ CAMERA INTRINSICS -- now derived from world_mono.yaml's `cameraL` block
   fx=fy~=461.04, cx=320, cy=240 -- computed at runtime, not hardcoded, so
   it stays correct if world_mono.yaml changes.
 
-PHANTOM_OBJ_PATH -- set below to the path you gave (relative to wherever
-  this script is run from). The script also cross-checks this against
-  wound_faces.json's own embedded obj_path and warns on any mismatch.
-  Note this path is relative, not absolute -- it will only resolve
-  correctly if this script is run from the same working-directory depth
-  Phase 1's script was run from. Worth converting to an absolute path
-  once your project layout is fixed, to avoid this breaking silently if
-  run from elsewhere later (e.g. a different terminal, a scheduled job).
+STEP 3.3 LAYOUT -- images, frame_poses.json, and masks now live under a
+  shared dataset/processed/ tree instead of separate raw/processed roots:
+    dataset/processed/<run>/images/frame_XXXX.png, frame_poses.json
+                                    (written directly by orbit_scan.py)
+    dataset/processed/<run>/masks/frame_XXXX.png
+                                    (written by this script)
+
+PHANTOM_OBJ_PATH / WORLD_YAML_PATH -- now point at the original
+  surgical_robotics_challenge cloned repo paths. Both are
+  relative to this script -- resolve correctly only when this script runs
+  from the same working-directory.
 
 ROTATION MATH -- confidence notes:
   euler_to_matrix() uses R = Rz(yaw) @ Ry(pitch) @ Rx(roll). For the
@@ -126,17 +129,16 @@ _SRC_DIR      = os.path.dirname(_SCRIPT_DIR)           # .../src/
 _PERCEPTION   = os.path.dirname(_SRC_DIR)               # .../casa_perception/
 _SRG          = os.path.join(_SRC_DIR, "..", "..",
                               "surgical_robotics_challenge")  # .../casa_app/surgical_robotics_challenge/
+_SRG_ADF      = os.path.join(_SRG, "ADF")
+DATASET_DIR = os.path.join(_PERCEPTION, "dataset", "processed")  # .../casa_perception/dataset/processed/
 
-RAW_RUNS_DIR      = os.path.join(_PERCEPTION, "dataset", "raw")
-OUTPUT_MASKS_ROOT = os.path.join(_PERCEPTION, "dataset", "processed")
-
-WOUND_FACES_JSON  = os.path.join(_SCRIPT_DIR, "..", "wound_extract",
+WOUND_FACES_JSON  = os.path.join(_SRC_DIR, "wound_extract",
                                    "output", "wound_faces_simple.json")
 
-PHANTOM_OBJ_PATH  = os.path.join(_SRG, "ADF", "Phantoms", "Simple",
+PHANTOM_OBJ_PATH  = os.path.join(_SRG_ADF, "Phantoms", "Simple",
                                    "high_res", "Phantom.OBJ")
 
-WORLD_YAML_PATH   = os.path.join(_SRG, "ADF", "world", "world_mono.yaml")
+WORLD_YAML_PATH   = os.path.join(_SRG_ADF, "world", "world_mono.yaml")
 CAMERA_KEY        = "cameraL"   # only active camera per world_mono.yaml's `cameras:` list
 
 RUN_NAMES = ["run_01", "run_02", "run_03", "run_04"]
@@ -411,8 +413,8 @@ def rasterize_mask(pixel_faces, img_w, img_h):
 # ==============================================================================
 
 def process_run(run_name, wound_faces_local_xyz, wound_normals_local, fx, fy, cx, cy, img_w, img_h):
-    run_dir = os.path.join(RAW_RUNS_DIR, run_name)
-    poses_path = os.path.join(run_dir, "camera_poses.json")
+    images_dir = os.path.join(DATASET_DIR, run_name, "images")
+    poses_path = os.path.join(images_dir, "frame_poses.json")
     with open(poses_path, "r") as f:
         data = json.load(f)
 
@@ -425,7 +427,7 @@ def process_run(run_name, wound_faces_local_xyz, wound_normals_local, fx, fy, cx
     )
     world_normals = transform_normals_local_to_world(wound_normals_local, phantom_rotation_rpy)
 
-    out_masks_dir = os.path.join(OUTPUT_MASKS_ROOT, run_name, "masks")
+    out_masks_dir = os.path.join(DATASET_DIR, run_name, "masks")
     os.makedirs(out_masks_dir, exist_ok=True)
 
     total_culled_backface = 0
