@@ -15,6 +15,11 @@ MODES
         to visually confirm AMBF's rotation convention. (Already
         confirmed correct for this setup -- see comments in look_at_rpy.)
 
+    python3 orbit_scan.py --calibrate
+        Holds the camera at a KNOWN fixed world position, commands a small 
+        set of KNOWN rpy values (same four cases as --test-rpy), and 
+        SAVES one real frame + the exact commanded values for each.
+
     python3 orbit_scan.py --live
         Watch the orbit motion with a preview window (Q to quit). Does
         NOT save anything -- just for checking the motion looks right.
@@ -27,12 +32,12 @@ MODES
     python3 orbit_scan.py --live --capture
         Orbit, show the preview window, AND save images at the same time.
 
-    python3 orbit_scan.py --capture --out-dir <PATH>
+    python3 orbit_scan.py [--capture | --calibrate] --out-dir <PATH>
         Save the dataset to a custom folder instead of the default
-        "orbit_dataset/" next to this script. Useful for keeping separate
-        fixed-light vs varied-light datasets, e.g.:
-          --out-dir orbit_dataset_fixed_light
-          --out-dir orbit_dataset_varied_light
+        Step 3.3 convention: point --out-dir at .../run_XX/images directly 
+        (the wrapper script capture_all_runs.sh does this for you across all
+        4 runs) -- images and frame_poses.json land together in that
+        folder.
 
     python3 orbit_scan.py --live --vary-brightness
         Watch the orbit motion while light1 also moves independently
@@ -53,27 +58,28 @@ MODES
 
 OUTPUT (when using --capture)
 ------------------------------
-Saved in a folder called "orbit_dataset" next to this script:
-    orbit_dataset/frame_0000.png, frame_0001.png, ...
-    orbit_dataset/camera_poses.json   -- JSON object with three top-level
-                                          keys:
-                                            "phantom_position" -- the
-                                              phantom's x/y/z at scan
-                                              start (constant for the
-                                              whole run).
-                                            "phantom_rotation_rpy" -- the
-                                              phantom's roll/pitch/yaw at
-                                              scan start (constant for
-                                              the whole run). Together
-                                              with phantom_position, used
-                                              to transform
-                                              wound_faces.json from local
-                                              to world space.
-                                            "frames" -- one entry per
-                                              saved image, with its exact
-                                              camera position/pose,
-                                              needed later for mask
-                                              projection.
+Saved next to the script or into --out-dir if provided (Step 3.3 convention:
+dataset/processed/run_XX/images/, one run per directory):
+    <out-dir>/frame_0000.png, frame_0001.png, ...
+    <out-dir>/frame_poses.json   -- JSON object with three top-level
+                                     keys:
+                                       "phantom_position" -- the
+                                         phantom's x/y/z at scan
+                                         start (constant for the
+                                         whole run).
+                                       "phantom_rotation_rpy" -- the
+                                         phantom's roll/pitch/yaw at
+                                         scan start (constant for
+                                         the whole run). Together
+                                         with phantom_position, used
+                                         to transform
+                                         wound_faces.json from local
+                                         to world space.
+                                       "frames" -- one entry per
+                                         saved image, with its exact
+                                         camera position/pose,
+                                         needed later for mask
+                                         projection.
 
 WHAT CHANGED FROM THE LAST VERSION
 ------------------------------------
@@ -160,6 +166,10 @@ POSITION_READ_TIMEOUT_SEC = 5.0
 
 # --- capture settings (only used in --capture mode) ---
 CAPTURE_INTERVAL_SEC = 1.0   # save one frame this often
+FIRST_FRAME_SETTLE_SEC = 0.5 # extra settle time before frame 0 specifically,
+                              # so its pose command has time to actually
+                              # render/publish before being captured (see
+                              # note at last_capture_t init in run_scan)
 NUM_CAPTURES = 500           # auto-stop after this many images
 
 
@@ -428,6 +438,70 @@ def run_test_rpy():
 
 
 # ==============================================================================
+# MODE: --calibrate
+# ==============================================================================
+
+def run_calibrate(out_dir):
+    ac = connect()
+    cam = ac.get_obj_handle(CAMERA_FRAME_NAME)
+    phantom = ac.get_obj_handle(PHANTOM_NAME)
+    time.sleep(0.5)
+
+    phantom_center = read_position_safely(phantom, "Phantom")
+    fixed_pos = (phantom_center[0], phantom_center[1], phantom_center[2] + 0.3)
+
+    tests = [
+        ("identity", (0.0, 0.0, 0.0)),
+        ("look_at_rpy", look_at_rpy(fixed_pos, phantom_center)),
+        ("pitch_p90", (0.0, math.pi / 2, 0.0)),
+        ("yaw_p90", (0.0, 0.0, math.pi / 2)),
+    ]
+
+    if not rclpy.ok():
+        rclpy.init()
+    cam_node = CamSub()
+    spin_thread = threading.Thread(target=rclpy.spin, args=(cam_node,), daemon=True)
+    spin_thread.start()
+
+    print("[CALIBRATE] Waiting for the camera feed to connect...")
+    t0 = time.time()
+    while cam_node.get_frame() is None and time.time() - t0 < 15:
+        time.sleep(0.3)
+    if cam_node.get_frame() is None:
+        print("[ERROR] No camera frames received -- is the sim publishing images?")
+        ac.clean_up()
+        sys.exit(1)
+
+    os.makedirs(out_dir, exist_ok=True)
+    log = {
+        "phantom_position": {"x": phantom_center[0], "y": phantom_center[1], "z": phantom_center[2]},
+        "fixed_camera_pos": {"x": fixed_pos[0], "y": fixed_pos[1], "z": fixed_pos[2]},
+        "tests": [],
+    }
+
+    for i, (label, rpy) in enumerate(tests):
+        print(f"[CALIBRATE] Test {i}: {label}  rpy={tuple(round(v, 6) for v in rpy)}")
+        t_end = time.time() + 2.0
+        while time.time() < t_end:
+            cam.set_pos(*fixed_pos)
+            cam.set_rpy(*rpy)
+            time.sleep(1.0 / COMMAND_HZ)
+        frame = cam_node.get_frame()
+        fname = f"calib_{i:02d}_{label}.png"
+        cv2.imwrite(os.path.join(out_dir, fname), frame)
+        log["tests"].append({
+            "index": i, "label": label, "image": fname,
+            "roll": rpy[0], "pitch": rpy[1], "yaw": rpy[2],
+        })
+        print(f"[CALIBRATE]   saved {fname}")
+
+    with open(os.path.join(out_dir, "calibration.json"), "w") as f:
+        json.dump(log, f, indent=2)
+    print(f"\n[CALIBRATE] Done. 4 images + calibration.json written to: {out_dir}")
+    ac.clean_up()
+
+
+# ==============================================================================
 # MODE: --live / --capture -- the actual orbit scan
 # ==============================================================================
 
@@ -509,7 +583,15 @@ def run_scan(show_preview, capture, out_dir, vary_light, vary_brightness):
 
     dt = 1.0 / COMMAND_HZ
     t0 = time.time()
-    last_capture_t = -999.0
+    # NOTE: frame 0 gets zero settle time between its pose command and the
+    # capture-eligibility check below, unlike every later frame (which gets
+    # ~1s of continuous small pose updates first). If the renderer/publisher
+    # hasn't caught up yet, cam_node.get_frame() can return a stale image
+    # while frame_poses.json records the pose that was just commanded --
+    # image and metadata silently desync for exactly that one frame. Delay
+    # the first eligible capture time to give the very first commanded pose
+    # real settle time, matching every other frame's implicit settle window.
+    last_capture_t = -999.0 if not capture else -(CAPTURE_INTERVAL_SEC - FIRST_FRAME_SETTLE_SEC)
     saved_count = 0
     poses_log = []
 
@@ -596,7 +678,7 @@ def run_scan(show_preview, capture, out_dir, vary_light, vary_brightness):
             print(f"\n[CAPTURE] Waiting for background image writer to finish "
                   f"({writer.q.qsize()} pending)...")
             writer.wait_and_stop()
-            poses_path = os.path.join(out_dir, "camera_poses.json")
+            poses_path = os.path.join(out_dir, "frame_poses.json")
             with open(poses_path, "w") as f:
                 json.dump({
                     "phantom_position": {
@@ -635,9 +717,13 @@ if __name__ == "__main__":
     p.add_argument("--discover", action="store_true", help="List objects + positions, then exit.")
     p.add_argument("--test-rpy", action="store_true",
                     help="Hold camera fixed, cycle orientation tests.")
+    p.add_argument("--calibrate", action="store_true",
+                    help="Same 4 test orientations as --test-rpy, but SAVES a real "
+                         "frame + exact rpy for each instead of just previewing -- "
+                         "use this to actually resolve the camera axis convention.")
     p.add_argument("--live", action="store_true", help="Preview the orbit motion (no saving).")
     p.add_argument("--capture", action="store_true",
-                    help="Orbit AND save images + camera_poses.json to the output folder.")
+                    help="Orbit AND save images + frame_poses.json to the output folder.")
     p.add_argument("--out-dir", default=OUTPUT_DIR_DEFAULT,
                     help="Where to save images/poses (only used with --capture). "
                          "Point this at a NEW folder for each dataset variant, "
@@ -656,6 +742,8 @@ if __name__ == "__main__":
         run_discover()
     elif args.test_rpy:
         run_test_rpy()
+    elif args.calibrate:
+        run_calibrate(args.out_dir)
     else:
         run_scan(show_preview=args.live, capture=args.capture,
                   out_dir=args.out_dir, vary_light=args.vary_light,

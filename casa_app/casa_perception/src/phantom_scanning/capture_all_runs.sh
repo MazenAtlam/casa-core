@@ -20,7 +20,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ORBIT_SCAN="$SCRIPT_DIR/orbit_scan.py"
 # dataset/ goes two levels up from this script's dir (parent of parent)
-BASE_OUT_DIR="$(dirname "$(dirname "$SCRIPT_DIR")")/dataset/raw"
+BASE_OUT_DIR="$(dirname "$(dirname "$SCRIPT_DIR")")/dataset/processed"
 
 # Sanity checks
 if [[ ! -f "$ORBIT_SCAN" ]]; then
@@ -40,7 +40,7 @@ echo ""
 # Run 01 — fixed light, fixed brightness   (control / clean baseline)
 # ------------------------------------------------------------------------------
 RUN="run_01"
-OUT="$BASE_OUT_DIR/$RUN"
+OUT="$BASE_OUT_DIR/$RUN/images"
 echo "=== [$RUN] fixed light | fixed brightness -> $OUT ==="
 python3 "$ORBIT_SCAN" --live --capture --out-dir "$OUT"
 echo "=== [$RUN] complete ==="
@@ -50,7 +50,7 @@ echo ""
 # Run 02 — fixed light, varied brightness  (isolates brightness effect alone)
 # ------------------------------------------------------------------------------
 RUN="run_02"
-OUT="$BASE_OUT_DIR/$RUN"
+OUT="$BASE_OUT_DIR/$RUN/images"
 echo "=== [$RUN] fixed light | varied brightness -> $OUT ==="
 python3 "$ORBIT_SCAN" --live --capture --vary-brightness --out-dir "$OUT"
 echo "=== [$RUN] complete ==="
@@ -60,7 +60,7 @@ echo ""
 # Run 03 — varied light, fixed brightness  (isolates light-position effect alone)
 # ------------------------------------------------------------------------------
 RUN="run_03"
-OUT="$BASE_OUT_DIR/$RUN"
+OUT="$BASE_OUT_DIR/$RUN/images"
 echo "=== [$RUN] varied light | fixed brightness -> $OUT ==="
 python3 "$ORBIT_SCAN" --live --capture --vary-light --out-dir "$OUT"
 echo "=== [$RUN] complete ==="
@@ -70,7 +70,7 @@ echo ""
 # Run 04 — varied light, varied brightness (combined effect)
 # ------------------------------------------------------------------------------
 RUN="run_04"
-OUT="$BASE_OUT_DIR/$RUN"
+OUT="$BASE_OUT_DIR/$RUN/images"
 echo "=== [$RUN] varied light | varied brightness -> $OUT ==="
 python3 "$ORBIT_SCAN" --live --capture --vary-light --vary-brightness --out-dir "$OUT"
 echo "=== [$RUN] complete ==="
