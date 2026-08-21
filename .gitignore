@@ -37,3 +37,6 @@ casa_app/casa_autonomy_stack/data/expert_demonstrations/
 # --- Datasets ---
 casa_app/casa_perception/dataset/processed/
 casa_app/casa_perception/dataset/raw/
+
+# --- QA Reviews ---
+casa_app/casa_perception/src/mask_generation/qa_review/overlays/
