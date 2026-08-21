@@ -72,7 +72,16 @@ REVIEW_DIR = "qa_review"
 
 RANDOM_BASELINE_N = 50     # per the original Step 3.4 plan
 BORDER_MARGIN_FRAC = 0.05  # mask centroid within 5% of any edge -> flagged
-WHITE_BLOWOUT_THRESH = 0.10  # >10% of raw-image pixels blown to pure white
+
+# Whole-frame blowout: informational only, NOT a flag trigger
+FRAME_BLOWOUT_INFO_THRESH = 0.10
+
+# This is the check that actually matters: is the blowout anywhere near
+# the wound itself, not just somewhere in the (often large, irrelevant)
+# background.
+WOUND_AREA_BLOWOUT_THRESH = 0.15
+WOUND_AREA_DILATE_PX = 40  # margin around the mask to check, in pixels
+
 RANDOM_SEED = 42           # reproducible baseline sample across reruns
 
 
@@ -128,10 +137,37 @@ def mask_stats(mask_path):
 
 
 def white_blowout_frac(image_path):
+    """Whole-frame blowout fraction -- coarse signal, catches the artifact but
+    doesn't distinguish 'background is white' from 'the wound itself is
+    washed out'. Kept for visibility into how common the background artifact
+    is, but see wound_area_blowout_frac() for the actually decision-relevant
+    check."""
     img = cv2.imread(image_path)
     if img is None:
         return None
     return float((img > 250).all(axis=2).mean())
+
+
+def wound_area_blowout_frac(image_path, mask_path, dilate_px=40):
+    """Blowout fraction restricted to a margin around the wound itself
+    (mask dilated by dilate_px), not the whole frame. This is the check
+    that actually matters for training: a blown-out background elsewhere
+    in frame doesn't compromise the segmentation target the way a blown-
+    out wound region would. Returns None if the mask is empty (nothing to
+    check a margin around)."""
+    img = cv2.imread(image_path)
+    mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+    if img is None or mask is None:
+        return None
+    if not np.any(mask > 127):
+        return None
+    kernel = np.ones((dilate_px, dilate_px), np.uint8)
+    region = cv2.dilate((mask > 127).astype(np.uint8), kernel)
+    blown = (img > 250).all(axis=2)
+    region_bool = region > 0
+    if region_bool.sum() == 0:
+        return None
+    return float(blown[region_bool].mean())
 
 
 # ==============================================================================
@@ -156,11 +192,13 @@ def main():
             ms = mask_stats(mpath)
             if ms is None:
                 continue
-            blow = white_blowout_frac(ipath)
+            frame_blow = white_blowout_frac(ipath)
+            wound_blow = wound_area_blowout_frac(ipath, mpath, dilate_px=WOUND_AREA_DILATE_PX)
             all_records.append({
                 "run": run, "name": name,
                 "n_px": ms["n_px"], "cx": ms["cx"], "cy": ms["cy"],
-                "w": ms["w"], "h": ms["h"], "blowout": blow,
+                "w": ms["w"], "h": ms["h"],
+                "frame_blowout": frame_blow, "wound_blowout": wound_blow,
             })
 
     if not all_records:
@@ -193,13 +231,22 @@ def main():
             if r["cx"] < mx or r["cx"] > r["w"] - mx or r["cy"] < my or r["cy"] > r["h"] - my:
                 reasons.append("CENTROID_NEAR_BORDER")
 
-        if r["blowout"] is not None and r["blowout"] > WHITE_BLOWOUT_THRESH:
-            reasons.append(f"OVEREXPOSED({r['blowout']:.0%})")
+        if r["wound_blowout"] is not None and r["wound_blowout"] > WOUND_AREA_BLOWOUT_THRESH:
+            reasons.append(f"WOUND_AREA_OVEREXPOSED({r['wound_blowout']:.0%})")
 
         if reasons:
             flagged.append((r["run"], r["name"], reasons))
 
     print(f"[FLAGGED] {len(flagged)}/{len(all_records)} frames flagged for manual review")
+
+    frame_blow_vals = [r["frame_blowout"] for r in all_records if r["frame_blowout"] is not None]
+    n_bg_artifact = sum(1 for v in frame_blow_vals if v > FRAME_BLOWOUT_INFO_THRESH)
+    print(f"[INFO] Background blowout artifact (>{FRAME_BLOWOUT_INFO_THRESH:.0%} of whole "
+          f"frame, likely a finite backdrop-plane edge -- see prior verification): present "
+          f"in {n_bg_artifact}/{len(frame_blow_vals)} frames ({n_bg_artifact/len(frame_blow_vals):.1%}). "
+          f"NOT flagged on its own -- confirmed by hand across the full severity range that "
+          f"this spares the wound region. Only flagged if it actually reaches the wound "
+          f"(see WOUND_AREA_OVEREXPOSED below).")
 
     flagged_keys = {(run, name) for run, name, _ in flagged}
     candidates = [r for r in all_records if (r["run"], r["name"]) not in flagged_keys]
@@ -211,14 +258,14 @@ def main():
     reasons_by_key = {(run, name): reasons for run, name, reasons in flagged}
     with open(report_path, "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["run", "name", "n_px", "cx", "cy", "blowout_frac",
-                          "flag_reasons", "category"])
+        writer.writerow(["run", "name", "n_px", "cx", "cy", "frame_blowout_frac",
+                          "wound_area_blowout_frac", "flag_reasons", "category"])
         for r in all_records:
             key = (r["run"], r["name"])
             reasons = reasons_by_key.get(key, [])
             category = "FLAGGED" if reasons else ("BASELINE" if key in baseline_keys else "")
             writer.writerow([r["run"], r["name"], r["n_px"], r["cx"], r["cy"],
-                              r["blowout"], ";".join(reasons), category])
+                              r["frame_blowout"], r["wound_blowout"], ";".join(reasons), category])
     print(f"[REPORT] Wrote {report_path} ({len(all_records)} rows)")
 
     if all_issues:

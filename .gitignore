@@ -39,4 +39,4 @@ casa_app/casa_perception/dataset/processed/
 casa_app/casa_perception/dataset/raw/
 
 # --- QA Reviews ---
-casa_app/casa_perception/src/mask_generation/qa_review/overlays/
+casa_app/casa_perception/src/mask_generation/qa_review/
