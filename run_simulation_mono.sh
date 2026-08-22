@@ -44,5 +44,5 @@ fi
 
 # -l indices: 10=Simple Phantom, 2=PSM1, 4=PSM2
 # Omitted:    11=Phantom ghosts, 3=PSM1 ghosts, 5=PSM2 ghosts
-$SIM_PATH --launch_file launch_mono.yaml -l 10,2,4 -p 200 -t1 \
+$SIM_PATH --launch_file launch_mono.yaml -l 10,2,4,3,5 -p 200 -t1 \
   --override_max_comm_freq 100 --override_min_comm_freq 100
