@@ -87,6 +87,18 @@ MERGE_DIST = 0.005          # meters -- bridges small gaps in the groove; tune t
 MIN_FACE_VOTES = 2          # a face counts as "wound" if >= this many of its
                              # 3 corners are wound vertices
 
+DILATION_RINGS = 5          # <-- THE KNOB TO TUNE: after finding the core wound
+                             # (the sharp crease), grow it outward by this many
+                             # "rings" of connected neighboring vertices, so the
+                             # final labeled region includes a margin around the
+                             # crease, not just the crease itself -- since this
+                             # is meant to be the valid region for needle
+                             # placement, not just where curvature peaks.
+                             # 0 = no margin (old behavior). Each ring is roughly
+                             # one mesh-edge-length wider. Start here, go up if
+                             # the region still looks too tight, down if it starts
+                             # eating into clearly-flat tissue.
+
 
 # ==============================================================================
 # OBJ PARSING
@@ -138,6 +150,24 @@ def compute_vertex_curvature(verts, faces, face_normals):
     mean_normals = accum / counts[:, None]
     curvature = 1.0 - np.linalg.norm(mean_normals, axis=1)
     return curvature
+
+
+def dilate_vertex_set(vertex_set, adj, rings):
+    """
+    Grows `vertex_set` outward by `rings` hops along the mesh's own edge
+    connectivity (the same `adj` graph used for clustering). Ring 1 adds
+    every vertex directly connected to something already in the set; ring
+    2 adds everything connected to THOSE, and so on -- a controllable
+    margin around the core detected wound, independent of the curvature
+    threshold that found the core in the first place.
+    """
+    current = set(vertex_set)
+    for _ in range(rings):
+        frontier = set()
+        for v in current:
+            frontier.update(adj[v])
+        current |= frontier
+    return current
 
 
 def build_vertex_adjacency(faces):
@@ -228,7 +258,11 @@ def main():
           f"small ones are probably the block's corners)")
 
     wound_verts = merge_nearby_fragments(verts, components, MERGE_DIST)
-    print(f"      Final wound vertex count: {len(wound_verts)}")
+    print(f"      Core wound vertex count (before margin): {len(wound_verts)}")
+
+    if DILATION_RINGS > 0:
+        wound_verts = dilate_vertex_set(wound_verts, adj, DILATION_RINGS)
+        print(f"      After growing by {DILATION_RINGS} ring(s): {len(wound_verts)} vertices")
 
     print("[4/5] Converting wound vertices to wound faces ...")
     wound_faces = []

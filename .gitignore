@@ -40,3 +40,7 @@ casa_app/casa_perception/dataset/raw/
 
 # --- QA Reviews ---
 casa_app/casa_perception/src/mask_generation/qa_review/
+casa_app/casa_perception/dataset/
+
+# --- wound extract image ---
+casa_app/casa_perception/src/wound_extract/output/
