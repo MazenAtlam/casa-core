@@ -11,6 +11,19 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SRC_DIR="$SCRIPT_DIR/src"
 SIM_DIR="$SCRIPT_DIR/casa_app/surgical_robotics_challenge"
 
+# 1. Source the workspace setup file if it exists to populate PATH and LD_LIBRARY_PATH
+if [ -f "$SCRIPT_DIR/install/setup.bash" ]; then
+  source "$SCRIPT_DIR/install/setup.bash"
+elif [ -f "$SCRIPT_DIR/devel/setup.bash" ]; then
+  source "$SCRIPT_DIR/devel/setup.bash"
+fi
+
+# 2. Explicitly append any lib directories in install/ and build/ containing AMBF shared objects
+AMBF_LIB_DIRS=$(find "$SCRIPT_DIR/install" "$SCRIPT_DIR/build" -name "libambf_framework.so" -exec dirname {} \; 2>/dev/null | tr '\n' ':')
+if [ -n "$AMBF_LIB_DIRS" ]; then
+  export LD_LIBRARY_PATH="${AMBF_LIB_DIRS}${LD_LIBRARY_PATH}"
+fi
+
 echo "Patching submodule with mono camera config..."
 
 # Copy world config patch (single left camera only)
@@ -44,5 +57,5 @@ fi
 
 # -l indices: 10=Simple Phantom, 2=PSM1, 4=PSM2
 # Omitted:    11=Phantom ghosts, 3=PSM1 ghosts, 5=PSM2 ghosts
-$SIM_PATH --launch_file launch_mono.yaml -l 10,2,4,3,5 -p 200 -t1 \
+$SIM_PATH --launch_file launch_mono.yaml -l 10,2,4 -p 200 -t1 \
   --override_max_comm_freq 100 --override_min_comm_freq 100
